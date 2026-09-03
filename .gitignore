@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual Environment
+venv/
+
+# Logs
+logs/
+*.log
+
+# Databases
+
+data/*.db
+
+
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Local secrets
+.env
+.env.*
+
+# Local Config	
+config/config.yaml

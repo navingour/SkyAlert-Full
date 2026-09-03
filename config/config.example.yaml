@@ -1,0 +1,11 @@
+general:
+  poll_interval: 15
+
+tar1090:
+  url: "http://localhost/tar1090/data/aircraft.json"
+
+telegram:
+  enabled: true
+  bot_token: "YOUR_REAL_TOKEN"
+  chat_id: "YOUR_REAL_CHAT_ID"
+

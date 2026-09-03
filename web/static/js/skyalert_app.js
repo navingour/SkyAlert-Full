@@ -1,0 +1,1904 @@
+/**
+ * SkyAlert Web Application Controller
+ * Single-page dynamic routing, live polling, interactive tables, charts, modals, and IST time format.
+ */
+
+class SkyAlertApp {
+    constructor() {
+        this.currentView = "dashboard";
+        this.radarMap = null;
+        this.selectedAircraftHex = null;
+        this.livePollInterval = null;
+        this.searchDebounceTimer = null;
+        this.aircraftTableParams = {
+            page: 1,
+            pageSize: 25,
+            search: "",
+            operator: "",
+            type: "",
+            enriched: "",
+            sortBy: "last_seen",
+            order: "desc"
+        };
+        this.rareVisitsFilter = 5;
+        this.rareViewMode = 'cards';
+        this.operatorTimeframe = 'lifetime';
+        this.dashboardTimeframe = 'today';
+        this.rarePollInterval = null;
+        this.formationPollInterval = null;
+        this.trafficChart = null;
+        this.aircraftChart = null;
+        this.adsbdbCache = {};
+    }
+
+    init() {
+        // Initialize Radar Map
+        this.radarMap = new SkyAlertRadarMap("leaflet-radar-map");
+
+        // Bind global events
+        this.bindEvents();
+
+        // Start station clock
+        this.startStationClock();
+
+        // Routing from URL Hash
+        this.handleHashChange();
+        window.addEventListener("hashchange", () => this.handleHashChange());
+
+        // Start Live Polling
+        this.startLivePolling();
+    }
+
+    startStationClock() {
+        const updateClock = () => {
+            const clockEl = document.getElementById("station-ist-clock");
+            if (!clockEl) return;
+            const now = new Date();
+            // Format in IST
+            const options = {
+                timeZone: "Asia/Kolkata",
+                day: "numeric",
+                month: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+                hour12: false
+            };
+            const formatter = new Intl.DateTimeFormat("en-GB", options);
+            clockEl.textContent = formatter.format(now) + " IST";
+        };
+        updateClock();
+        setInterval(updateClock, 1000);
+    }
+
+    bindEvents() {
+        // Navigation links
+        document.querySelectorAll("[data-nav-target]").forEach(btn => {
+            btn.addEventListener("click", (e) => {
+                const target = btn.getAttribute("data-nav-target");
+                window.location.hash = target;
+            });
+        });
+
+        // Global Search input & keyboard shortcut
+        const searchInput = document.getElementById("global-search-input");
+        if (searchInput) {
+            searchInput.addEventListener("focus", () => this.openSearchModal());
+        }
+
+        window.addEventListener("keydown", (e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+                e.preventDefault();
+                this.openSearchModal();
+            } else if (e.key === "Escape") {
+                this.closeAllModals();
+            }
+        });
+
+        // Modal Search Input
+        const modalSearchInput = document.getElementById("modal-search-field");
+        if (modalSearchInput) {
+            modalSearchInput.addEventListener("input", (e) => {
+                clearTimeout(this.searchDebounceTimer);
+                this.searchDebounceTimer = setTimeout(() => this.performSearch(e.target.value), 250);
+            });
+        }
+
+        // Table filters
+        const tblSearch = document.getElementById("table-filter-search");
+        if (tblSearch) {
+            tblSearch.addEventListener("input", (e) => {
+                this.aircraftTableParams.search = e.target.value;
+                this.aircraftTableParams.page = 1;
+                this.fetchAircraftTable();
+            });
+        }
+
+        const tblEnriched = document.getElementById("table-filter-enriched");
+        if (tblEnriched) {
+            tblEnriched.addEventListener("change", (e) => {
+                this.aircraftTableParams.enriched = e.target.value;
+                this.aircraftTableParams.page = 1;
+                this.fetchAircraftTable();
+            });
+        }
+    }
+
+    handleHashChange() {
+        const hash = window.location.hash.replace("#", "") || "dashboard";
+        if (hash.startsWith("aircraft-profile/")) {
+            const hex = hash.split("/")[1];
+            this.openAircraftProfile(hex);
+            return;
+        }
+
+        this.switchView(hash);
+    }
+
+    switchView(viewName) {
+        this.currentView = viewName;
+
+        // Update nav active classes
+        document.querySelectorAll(".sky-nav-link").forEach(link => {
+            if (link.getAttribute("data-nav-target") === viewName) {
+                link.classList.add("active");
+            } else {
+                link.classList.remove("active");
+            }
+        });
+
+        // Show/hide view sections
+        document.querySelectorAll(".view-section").forEach(sec => {
+            sec.classList.remove("active-view");
+        });
+
+        const targetSec = document.getElementById(`view-${viewName}`);
+        if (targetSec) {
+            targetSec.classList.add("active-view");
+        }
+
+        // Update topbar title
+        const titles = {
+            "dashboard": ["Dashboard", "Station Operations & ADS-B Analytics"],
+            "live": ["Live Airspace", "Active Aircraft & Radar Coverage"],
+            "aircraft": ["Aircraft Database", "Searchable ICAO Records & Historical Visits"],
+            "sessions": ["Detection Sessions", "Continuous Passes & Station Visit Logs"],
+            "analytics": ["Global Analytics", "24-Hour Traffic, Operators & Fleet Intelligence"],
+            "weather": ["Weather Analytics", "Upper‑Air Thermal Profiles & Wind Shear"],
+            "receiver": ["Receiver Analytics", "Signal Horizon & ADS‑B Quality"],
+            "fleet": ["Fleet Analytics", "Turnaround Metrics & Traffic Density"],
+            "formation": ["Formation Detection", "Real‑time Escort Flight Identification"],
+            "map": ["Radar Map", "Fixed Station Range & Live Spatial Tracking"],
+            "operators": ["Operator Intelligence", "Airlines & Fleet Analytics"],
+            "types": ["Aircraft Types", "ICAO Type Performance & Visits"],
+            "rare": ["Rare Aircraft", "Aircraft rarely detected by this receiver"],
+            "rare-aircraft": ["Rare Aircraft", "Aircraft rarely detected by this receiver"],
+            "unknown": ["Unknown Aircraft", "Un-enriched Airframes & Resolution Queue"],
+            "settings": ["System Configuration", "Station Parameters & Alerting Rules"],
+            "aircraft-profile": ["Aircraft Intelligence", "Comprehensive Airframe Profile & Visit History"]
+        };
+
+        const [mainTitle, subTitle] = titles[viewName] || ["SkyAlert", "Control Center"];
+        const titleEl = document.getElementById("view-title-text");
+        const subTitleEl = document.getElementById("view-subtitle-text");
+        if (titleEl) titleEl.textContent = mainTitle;
+        if (subTitleEl) subTitleEl.textContent = subTitle;
+
+        // Clear rare polling if switching away
+        if (this.rarePollInterval && viewName !== "rare" && viewName !== "rare-aircraft") {
+            clearInterval(this.rarePollInterval);
+            this.rarePollInterval = null;
+        }
+        // Clear formation polling if switching away
+        if (this.formationPollInterval && viewName !== "formation") {
+            clearInterval(this.formationPollInterval);
+            this.formationPollInterval = null;
+        }
+
+        // View specific refresh
+        if (viewName === "dashboard") {
+            this.loadDashboardData();
+        } else if (viewName === "live" || viewName === "map") {
+            this.radarMap.init();
+            this.radarMap.invalidateSize();
+            this.fetchLiveAircraft();
+        } else if (viewName === "aircraft") {
+            this.fetchAircraftTable();
+        } else if (viewName === "sessions") {
+            this.loadSessionsView();
+        } else if (viewName === "analytics") {
+            this.loadAnalyticsView();
+        } else if (viewName === "operators") {
+            this.loadOperatorsView();
+        } else if (viewName === "types") {
+            this.loadTypesView();
+        } else if (viewName === "weather") {
+            this.loadWeatherView();
+        } else if (viewName === "receiver") {
+            this.loadReceiverView();
+        } else if (viewName === "fleet") {
+            this.loadFleetView();
+        } else if (viewName === "formation") {
+            this.loadFormationView();
+            if (!this.formationPollInterval) {
+                this.formationPollInterval = setInterval(() => {
+                    if (this.currentView === "formation") {
+                        this.loadFormationView(true);
+                    }
+                }, 5000);
+            }
+        } else if (viewName === "rare" || viewName === "rare-aircraft") {
+            this.loadRareAircraft(this.rareVisitsFilter);
+            if (!this.rarePollInterval) {
+                this.rarePollInterval = setInterval(() => {
+                    if (this.currentView === "rare" || this.currentView === "rare-aircraft") {
+                        this.loadRareAircraft(this.rareVisitsFilter, true);
+                    }
+                }, 60000);
+            }
+        } else if (viewName === "unknown") {
+            this.loadUnknownView();
+        }
+    }
+
+    startLivePolling() {
+        this.fetchLiveAircraft();
+        if (this.livePollInterval) clearInterval(this.livePollInterval);
+        this.livePollInterval = setInterval(() => {
+            this.fetchLiveAircraft();
+            // Always keep dashboard KPIs and live count fresh regardless of active view
+            this.loadDashboardKPIsOnly();
+        }, 3500);
+    }
+
+    setDashboardTimeframe(tf) {
+        this.dashboardTimeframe = tf;
+        document.querySelectorAll('.dashboard-time-btn').forEach(btn => {
+            if (btn.dataset.timeframe === tf) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+        this.loadDashboardData();
+    }
+
+    async loadDashboardData() {
+        try {
+            const res = await fetch(`/api/dashboard?timeframe=${this.dashboardTimeframe}`);
+            const data = await res.json();
+            if (data.error) return;
+
+            // Render KPIs
+            this.renderKPIs(data.kpis);
+
+            // Render Topbar Quick Stats
+            const quickLive = document.getElementById("quick-live-count");
+            const quickToday = document.getElementById("quick-today-count");
+            if (quickLive) quickLive.textContent = data.live_aircraft_count || 0;
+            if (quickToday) quickToday.textContent = data.kpis.aircraft_seen_today || 0;
+
+            // Render Live Aircraft Preview cards
+            this.renderLivePreviewCards(data.live_aircraft_preview || []);
+
+            // Render Recent Alerts
+            this.renderRecentAlerts(data.recent_alerts || []);
+
+            // Render 24h Traffic chart
+            this.renderTrafficChart();
+        } catch (e) {
+            console.error("Failed to load dashboard data:", e);
+        }
+    }
+
+    async loadDashboardKPIsOnly() {
+        try {
+            const res = await fetch(`/api/dashboard?timeframe=${this.dashboardTimeframe}`);
+            const data = await res.json();
+            if (data.kpis) {
+                this.renderKPIs(data.kpis);
+                const quickLive = document.getElementById("quick-live-count");
+                if (quickLive) quickLive.textContent = data.live_aircraft_count || 0;
+            }
+        } catch (e) {}
+    }
+
+    renderKPIs(kpis) {
+        const tf = this.dashboardTimeframe || 'today';
+        const titleSeen = document.getElementById("kpi-title-seen");
+        const subtextSeen = document.getElementById("kpi-subtext-seen");
+        const titleVisits = document.getElementById("kpi-title-visits");
+        const subtextVisits = document.getElementById("kpi-subtext-visits");
+        const titleDetTime = document.getElementById("kpi-title-det-time");
+        const subtextDetTime = document.getElementById("kpi-subtext-det-time");
+
+        if (tf === 'week') {
+            if (titleSeen) titleSeen.innerHTML = `Aircraft Seen This Week <span class="kpi-icon">✈</span>`;
+            if (subtextSeen) subtextSeen.textContent = "Unique airframes detected this week";
+            if (titleVisits) titleVisits.innerHTML = `Visits This Week <span class="kpi-icon">🔄</span>`;
+            if (subtextVisits) subtextVisits.textContent = "Total continuous detection passes this week";
+            if (titleDetTime) titleDetTime.innerHTML = `Detection Time This Week <span class="kpi-icon">⏱</span>`;
+            if (subtextDetTime) subtextDetTime.textContent = "Cumulative flight duration this week";
+        } else if (tf === 'month') {
+            if (titleSeen) titleSeen.innerHTML = `Aircraft Seen This Month <span class="kpi-icon">✈</span>`;
+            if (subtextSeen) subtextSeen.textContent = "Unique airframes detected this month";
+            if (titleVisits) titleVisits.innerHTML = `Visits This Month <span class="kpi-icon">🔄</span>`;
+            if (subtextVisits) subtextVisits.textContent = "Total continuous detection passes this month";
+            if (titleDetTime) titleDetTime.innerHTML = `Detection Time This Month <span class="kpi-icon">⏱</span>`;
+            if (subtextDetTime) subtextDetTime.textContent = "Cumulative flight duration this month";
+        } else if (tf === 'lifetime') {
+            if (titleSeen) titleSeen.innerHTML = `Lifetime Aircraft Seen <span class="kpi-icon">✈</span>`;
+            if (subtextSeen) subtextSeen.textContent = "All-time unique airframes detected";
+            if (titleVisits) titleVisits.innerHTML = `Lifetime Visits <span class="kpi-icon">🔄</span>`;
+            if (subtextVisits) subtextVisits.textContent = "All-time continuous detection passes";
+            if (titleDetTime) titleDetTime.innerHTML = `Lifetime Detection Time <span class="kpi-icon">⏱</span>`;
+            if (subtextDetTime) subtextDetTime.textContent = "All-time cumulative flight duration";
+        } else {
+            if (titleSeen) titleSeen.innerHTML = `Aircraft Seen Today <span class="kpi-icon">✈</span>`;
+            if (subtextSeen) subtextSeen.textContent = "Unique airframes detected today";
+            if (titleVisits) titleVisits.innerHTML = `Visits Today <span class="kpi-icon">🔄</span>`;
+            if (subtextVisits) subtextVisits.textContent = "Total continuous detection passes today";
+            if (titleDetTime) titleDetTime.innerHTML = `Detection Time Today <span class="kpi-icon">⏱</span>`;
+            if (subtextDetTime) subtextDetTime.textContent = "Cumulative flight duration today";
+        }
+
+        const map = {
+            "kpi-seen-today": kpis.aircraft_seen_today ? kpis.aircraft_seen_today.toLocaleString() : "-",
+            "kpi-visits-today": kpis.visits_today ? kpis.visits_today.toLocaleString() : "-",
+            "kpi-active-aircraft": kpis.active_aircraft,
+            "kpi-total-aircraft": kpis.total_aircraft ? kpis.total_aircraft.toLocaleString() : "-",
+            "kpi-total-obs": kpis.total_observations ? kpis.total_observations.toLocaleString() : "-",
+            "kpi-det-time-today": kpis.total_detection_time_today,
+            "kpi-known-aircraft": kpis.known_enriched_aircraft,
+            "kpi-unknown-aircraft": kpis.unknown_aircraft,
+            "kpi-unique-ops": kpis.unique_operators_today,
+            "kpi-longest-session": kpis.longest_detection_session_today,
+            "kpi-avg-duration": kpis.average_visit_duration
+        };
+
+        for (const [id, val] of Object.entries(map)) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = val !== undefined && val !== null ? val : "-";
+        }
+    }
+
+    renderLivePreviewCards(planes) {
+        const container = document.getElementById("dashboard-live-cards-container");
+        if (!container) return;
+
+        if (planes.length === 0) {
+            container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 30px;">No aircraft currently in station range.</div>`;
+            return;
+        }
+
+        container.innerHTML = planes.map(plane => this.generateLiveCardHtml(plane)).join("");
+    }
+
+    generateLiveCardHtml(plane) {
+        const live = plane.live || {};
+        const identity = plane.identity || {};
+        const route = plane.route || null;
+
+        const hex = (plane.icao_hex || identity.icao_hex || live.hex || plane.id || "").toUpperCase();
+        const callsign = (plane.callsign && plane.callsign !== "-") ? plane.callsign : (identity.callsign || live.flight || hex);
+        const reg = (plane.registration && plane.registration !== "-") ? plane.registration : (identity.registration || hex);
+        const op = plane.operator || identity.operator || "Unknown Operator";
+        const model = plane.model || identity.model || plane.aircraft_type || identity.aircraft_type || "Unknown Type";
+        const dist = plane.distance_km ? `${plane.distance_km} km` : (live.r_dst ? `${live.r_dst} km` : "N/A");
+        const altVal = plane.altitude_ft || live.alt_baro || plane.alt_baro;
+        const alt = altVal ? `${altVal.toLocaleString()} ft` : "-";
+        const rawSpeed = plane.speed_kts || live.gs || plane.gs;
+        const gs = rawSpeed ? `${Math.round(rawSpeed * 1.852)} km/h` : (plane.speed_kmh ? `${Math.round(plane.speed_kmh)} km/h` : "-");
+        const dur = plane.duration || "< 1m";
+
+        const oatVal = plane.oat !== undefined && plane.oat !== null ? plane.oat : live.oat;
+        const tatVal = plane.tat !== undefined && plane.tat !== null ? plane.tat : live.tat;
+        const tempC = oatVal !== undefined && oatVal !== null ? `${Math.round(oatVal * 10) / 10}°C` : (tatVal !== undefined && tatVal !== null ? `${Math.round(tatVal * 10) / 10}°C` : null);
+
+        const wsVal = plane.ws !== undefined && plane.ws !== null ? plane.ws : live.ws;
+        const windMs = wsVal !== undefined && wsVal !== null ? `${Math.round(wsVal * 0.514444 * 10) / 10} m/s` : null;
+
+        const seenVal = plane.seen !== undefined && plane.seen !== null ? plane.seen : live.seen;
+        const lastContact = seenVal !== undefined && seenVal !== null ? (seenVal < 60 ? `${Math.round(seenVal * 10) / 10}s ago` : `${Math.round(seenVal / 60)}m ago`) : (plane.last_seen_ist || "Active");
+
+        const statusText = plane.status || "LIVE";
+        const statusClass = statusText === "LIVE" ? "live" : "recent";
+        const phaseObj = plane.flight_phase || { label: "En-Route", color: "#38bdf8" };
+        const phaseBadge = `<span class="live-badge" style="background: ${phaseObj.color}22; color: ${phaseObj.color}; border: 1px solid ${phaseObj.color}55; font-size: 10px; font-weight: 700;">${phaseObj.label}</span>`;
+
+
+
+        return `
+            <div class="live-card" onclick="window.SkyAlertApp.openAircraftProfile('${hex}')">
+                <div class="live-card-header">
+                    <div class="live-card-reg-flight">
+                        <div class="live-card-callsign">${callsign}</div>
+                        <div class="live-card-registration">${reg} · ${hex}</div>
+                    </div>
+                    <div style="display: flex; gap: 4px; align-items: center;">
+                        ${phaseBadge}
+                        <span class="live-badge ${statusClass}">${statusText}</span>
+                    </div>
+                </div>
+                <div class="live-card-meta">
+                    <div class="live-meta-row">
+                        <span>Operator</span>
+                        <span class="live-meta-val">${op}</span>
+                    </div>
+                    <div class="live-meta-row">
+                        <span>Type</span>
+                        <span class="live-meta-val">${model}</span>
+                    </div>
+                    <div class="live-meta-row">
+                        <span>Route</span>
+                        <span class="live-meta-val" data-route-callsign="${callsign}" data-route-hex="${hex}" style="${route && (route.origin_iata || route.origin_icao) ? 'color: var(--radar-green); font-weight: 700;' : ''}">
+                            ${ route ? `${route.origin_iata || route.origin_icao} → ${route.destination_iata || route.destination_icao}` : 'Unavailable' }
+                        </span>
+                    </div>
+                    ${tempC || windMs ? `
+                    <div class="live-meta-row">
+                        <span>Env / Weather</span>
+                        <span class="live-meta-val" style="color: var(--radar-cyan);">${tempC ? tempC : ''} ${tempC && windMs ? '·' : ''} ${windMs ? windMs : ''}</span>
+                    </div>
+                    ` : ''}
+                    <div class="live-meta-row">
+                        <span>Last Contact</span>
+                        <span class="live-meta-val mono" style="color: var(--radar-green); font-size: 11px;">${lastContact}</span>
+                    </div>
+                </div>
+                <div class="live-telemetry-strip">
+                    <div class="telemetry-cell">
+                        <span class="telemetry-lbl">Altitude</span>
+                        <span class="telemetry-val">${alt}</span>
+                    </div>
+                    <div class="telemetry-cell">
+                        <span class="telemetry-lbl">Speed</span>
+                        <span class="telemetry-val">${gs}</span>
+                    </div>
+                    <div class="telemetry-cell">
+                        <span class="telemetry-lbl">Distance</span>
+                        <span class="telemetry-val">${dist}</span>
+                    </div>
+                    <div class="telemetry-cell">
+                        <span class="telemetry-lbl">Duration</span>
+                        <span class="telemetry-val">${dur}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    async fetchAdsbdbRoute(callsign, hex) {
+        return null;
+    }
+
+    async enrichLiveCardRoutes() {
+        return;
+    }
+
+    async enrichAircraftProfileRoute(callsign, hex) {
+        return;
+    }
+
+    renderRecentAlerts(alerts) {
+        const container = document.getElementById("dashboard-alerts-container");
+        if (!container) return;
+
+        if (alerts.length === 0) {
+            container.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 20px;">No alerts triggered today.</div>`;
+            return;
+        }
+
+        container.innerHTML = alerts.map(a => `
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: var(--bg-secondary); border-radius: 6px; border: 1px solid var(--border-subtle); margin-bottom: 8px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 16px;">${a.title.includes('MILITARY') ? '🪖' : a.title.includes('EMERGENCY') ? '🚨' : '⭐'}</span>
+                    <div>
+                        <div style="font-weight: 700; font-size: 13px; color: var(--text-primary);">${a.flight || a.hex} · <span style="color: var(--radar-cyan);">${a.title}</span></div>
+                        <div style="font-size: 11px; color: var(--text-muted);">${a.operator || 'Unknown Operator'} · ${a.aircraft_type || 'Unknown'}</div>
+                    </div>
+                </div>
+                <div style="text-align: right; font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);">
+                    ${a.timestamp}
+                </div>
+            </div>
+        `).join("");
+    }
+
+    async fetchLiveAircraft() {
+        try {
+            const res = await fetch("/api/live");
+            const data = await res.json();
+            if (!data.aircraft) return;
+
+            // Update Map
+            if (this.radarMap) {
+                this.radarMap.updateAircraftMarkers(data.aircraft);
+            }
+
+            // Update Live Page Grid if active
+            if (this.currentView === "live") {
+                const grid = document.getElementById("live-airspace-grid");
+                const countBadge = document.getElementById("live-view-count-badge");
+                if (countBadge) countBadge.textContent = `${data.count} Aircraft`;
+                if (grid) {
+                    if (data.aircraft.length === 0) {
+                        grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 40px;">No active aircraft detected within receiver radius.</div>`;
+                    } else {
+                        grid.innerHTML = data.aircraft.map(p => this.generateLiveCardHtml(p)).join("");
+                    }
+                }
+            }
+        } catch (e) {
+            console.error("Error fetching live aircraft:", e);
+        }
+    }
+
+    async fetchAircraftTable() {
+        const { page, pageSize, search, operator, type, enriched, sortBy, order } = this.aircraftTableParams;
+        const tbody = document.getElementById("aircraft-table-body");
+        if (!tbody) return;
+
+        tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 30px; color: var(--text-muted);">Loading aircraft intelligence database...</td></tr>`;
+
+        try {
+            const query = new URLSearchParams({
+                page,
+                page_size: pageSize,
+                search,
+                operator,
+                aircraft_type: type,
+                enriched,
+                sort_by: sortBy,
+                order
+            });
+
+            const res = await fetch(`/api/aircraft?${query.toString()}`);
+            const data = await res.json();
+
+            if (!data.items || data.items.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 30px; color: var(--text-muted);">No aircraft found matching filter criteria.</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = data.items.map(item => `
+                <tr>
+                    <td class="mono"><span class="reg-link" onclick="window.SkyAlertApp.openAircraftProfile('${item.icao_hex}')">${item.icao_hex}</span></td>
+                    <td class="mono" style="font-weight: 600;">${item.callsign}</td>
+                    <td class="mono">${item.registration}</td>
+                    <td><span style="background: rgba(56,189,248,0.1); color: var(--radar-cyan); padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 11px;">${item.aircraft_type}</span></td>
+                    <td>${item.manufacturer}</td>
+                    <td>${item.model}</td>
+                    <td>${item.operator}</td>
+                    <td style="font-size: 12px; color: var(--text-muted);">${item.first_seen_ist}</td>
+                    <td style="font-size: 12px; color: var(--text-muted);">${item.last_seen_ist}</td>
+                    <td class="mono" style="text-align: center; font-weight: 700; color: var(--radar-green);">${item.lifetime_visits}</td>
+                </tr>
+            `).join("");
+
+            // Update Pagination
+            const pageInfo = document.getElementById("table-page-info");
+            if (pageInfo) pageInfo.textContent = `Page ${data.page} of ${data.total_pages} (${data.total.toLocaleString()} total aircraft)`;
+
+            const prevBtn = document.getElementById("table-prev-btn");
+            const nextBtn = document.getElementById("table-next-btn");
+            if (prevBtn) prevBtn.disabled = data.page <= 1;
+            if (nextBtn) nextBtn.disabled = data.page >= data.total_pages;
+
+        } catch (e) {
+            tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 30px; color: var(--radar-red);">Failed to load aircraft database.</td></tr>`;
+        }
+    }
+
+    tableNextPage() {
+        this.aircraftTableParams.page++;
+        this.fetchAircraftTable();
+    }
+
+    tablePrevPage() {
+        if (this.aircraftTableParams.page > 1) {
+            this.aircraftTableParams.page--;
+            this.fetchAircraftTable();
+        }
+    }
+
+    async openAircraftProfile(idOrHex) {
+        this.selectedAircraftHex = idOrHex;
+        window.location.hash = `aircraft-profile/${idOrHex}`;
+        this.switchView("aircraft-profile");
+
+        const container = document.getElementById("view-aircraft-profile");
+        if (!container) return;
+
+        container.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--text-muted);">Loading Aircraft Intelligence Profile for ${idOrHex}...</div>`;
+
+        try {
+            const [profileRes, sessionsRes, telemetryRes] = await Promise.all([
+                fetch(`/api/aircraft/${idOrHex}`),
+                fetch(`/api/aircraft/${idOrHex}/sessions`),
+                fetch(`/api/aircraft/${idOrHex}/telemetry`)
+            ]);
+
+            if (!profileRes.ok) throw new Error("Aircraft not found");
+
+            const profile = await profileRes.json();
+            const sessions = await sessionsRes.json();
+            const telemetry = telemetryRes.ok ? await telemetryRes.json() : { latest: {}, history: [] };
+
+            this.renderAircraftProfilePage(profile, sessions, telemetry);
+        } catch (e) {
+            container.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--radar-red);">Aircraft not found in database.</div>`;
+        }
+    }
+
+    renderAircraftProfilePage(p, sessions, telemetry = { latest: {}, history: [] }) {
+        const container = document.getElementById("view-aircraft-profile");
+        if (!container) return;
+
+        const isLive = p.status === "LIVE";
+        const statusBadge = isLive ? `<span class="live-badge live">● LIVE ACTIVE</span>` : `<span class="live-badge recent">INACTIVE</span>`;
+        const tLatest = telemetry.latest || {};
+        const tHistory = telemetry.history || [];
+
+        // Build list of non-null telemetry rows dynamically (Rule 5: Do not display null fields)
+        const telemetryRows = [];
+        if (tLatest.altitude_baro !== undefined) telemetryRows.push({ label: "Altitude (Barometric)", val: `${tLatest.altitude_baro.toLocaleString()} ft` });
+        if (tLatest.altitude_geom !== undefined) telemetryRows.push({ label: "Altitude (Geometric)", val: `${tLatest.altitude_geom.toLocaleString()} ft` });
+        if (tLatest.ground_speed_kts !== undefined) telemetryRows.push({ label: "Ground Speed", val: `${tLatest.ground_speed_kts} kts (${Math.round(tLatest.ground_speed_kts * 1.852)} km/h)` });
+        if (tLatest.indicated_airspeed_kts !== undefined) telemetryRows.push({ label: "Indicated Airspeed (IAS)", val: `${tLatest.indicated_airspeed_kts} kts` });
+        if (tLatest.true_airspeed_kts !== undefined) telemetryRows.push({ label: "True Airspeed (TAS)", val: `${tLatest.true_airspeed_kts} kts` });
+        if (tLatest.mach !== undefined) telemetryRows.push({ label: "Mach Number", val: `M${tLatest.mach}` });
+        if (tLatest.track !== undefined) telemetryRows.push({ label: "Track / Course", val: `${tLatest.track}°` });
+        if (tLatest.magnetic_heading !== undefined) telemetryRows.push({ label: "Magnetic Heading", val: `${tLatest.magnetic_heading}°` });
+        if (tLatest.true_heading !== undefined) telemetryRows.push({ label: "True Heading", val: `${tLatest.true_heading}°` });
+        if (tLatest.barometric_rate !== undefined) telemetryRows.push({ label: "Vertical Rate (Baro)", val: `${tLatest.barometric_rate} ft/min` });
+        if (tLatest.geometric_rate !== undefined) telemetryRows.push({ label: "Vertical Rate (Geom)", val: `${tLatest.geometric_rate} ft/min` });
+        if (tLatest.oat_c !== undefined) telemetryRows.push({ label: "Outside Air Temp (OAT)", val: `${tLatest.oat_c}°C` });
+        if (tLatest.tat_c !== undefined) telemetryRows.push({ label: "Total Air Temp (TAT)", val: `${tLatest.tat_c}°C` });
+        if (tLatest.wind_direction !== undefined) telemetryRows.push({ label: "Wind Direction", val: `${tLatest.wind_direction}°` });
+        if (tLatest.wind_speed_ms !== undefined) telemetryRows.push({ label: "Wind Speed", val: `${tLatest.wind_speed_ms} m/s` });
+        if (tLatest.rssi !== undefined) telemetryRows.push({ label: "Signal Strength (RSSI)", val: `${tLatest.rssi} dBm` });
+        if (tLatest.distance_km !== undefined) telemetryRows.push({ label: "Station Distance", val: `${tLatest.distance_km} km` });
+        if (tLatest.bearing !== undefined) telemetryRows.push({ label: "Bearing Angle", val: `${tLatest.bearing}°` });
+        if (tLatest.last_contact_seconds !== undefined) {
+            const sec = tLatest.last_contact_seconds;
+            const contactTxt = sec < 60 ? `${sec}s ago` : `${Math.round(sec / 60)}m ago`;
+            telemetryRows.push({ label: "Last Contact Made Time", val: `${contactTxt} (${tLatest.last_contact_ist || 'Recent'})` });
+        } else if (tLatest.last_contact_ist) {
+            telemetryRows.push({ label: "Last Contact Made Time", val: tLatest.last_contact_ist });
+        }
+
+        const currentSession = p.current_session || null;
+        const routeHistory = p.route_history || [];
+        const routeSummary = p.route_summary || { unique_routes_count: 0, observed_sessions_count: 0, days_observed_count: 0, most_observed_routes: [] };
+        const mostObserved = routeSummary.most_observed_routes || [];
+
+        container.innerHTML = `
+            <!-- Top Identity Banner -->
+            <div class="profile-header-banner">
+                <div class="profile-identity-main">
+                    <div class="profile-avatar-box">
+                        ✈
+                    </div>
+                    <div class="profile-identity-titles">
+                        <div class="profile-reg-callsign">
+                            ${p.registration} · ${p.callsign}
+                            <span class="profile-hex-badge">${p.icao_hex}</span>
+                            ${statusBadge}
+                        </div>
+                        <div class="profile-model-desc">${p.manufacturer.manufacturer} ${p.manufacturer.model} (${p.identity.aircraft_type})</div>
+                        <div class="profile-operator-sub">${p.operator.operator} · ${p.operator.country}</div>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="sky-btn" style="background: rgba(56, 189, 248, 0.15); color: var(--radar-cyan); border: 1px solid var(--radar-cyan);" onclick="window.SkyAlertApp.loadAircraftReplay('${p.icao_hex}')">
+                        ▶ Play Trajectory Replay
+                    </button>
+                    <button class="sky-btn primary" onclick="window.SkyAlertApp.triggerEnrichment('${p.icao_hex}')">
+                        ⚡ Refresh Enrichment
+                    </button>
+                    <button class="sky-btn" onclick="window.location.hash='aircraft'">
+                        ← Back to Aircraft Table
+                    </button>
+                </div>
+            </div>
+
+            <!-- Current Flight Section -->
+            <div class="sky-panel" style="margin-bottom: 20px;">
+                <div class="sky-panel-header" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span class="sky-panel-title">✈ CURRENT FLIGHT</span>
+                    ${p.status === 'LIVE' || currentSession ? `<span class="live-badge live">● LIVE ACTIVE</span>` : `<span class="live-badge recent">INACTIVE</span>`}
+                </div>
+                <div class="sky-panel-body">
+                    ${(currentSession || p.status === 'LIVE') ? `
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; align-items: center;">
+                        <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border-subtle);">
+                            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); font-weight: 700;">Callsign</div>
+                            <div style="font-size: 20px; font-weight: 800; color: var(--radar-cyan); font-family: var(--font-mono); margin-top: 4px;">${currentSession ? currentSession.callsign : (p.callsign || '-')}</div>
+                        </div>
+                        <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border-subtle);">
+                            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); font-weight: 700;">Route Vector</div>
+                            <div id="profile-route-vector" style="font-size: 20px; font-weight: 800; color: var(--radar-green); font-family: var(--font-mono); margin-top: 4px;">${currentSession ? currentSession.route_short : (p.route ? `${p.route.origin_iata || p.route.origin_icao || '???'} → ${p.route.destination_iata || p.route.destination_icao || '???'}` : 'Route unavailable')}</div>
+                        </div>
+                        <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border-subtle);">
+                            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); font-weight: 700;">Origin</div>
+                            <div id="profile-route-origin" style="font-size: 14px; font-weight: 700; color: var(--text-primary); margin-top: 4px;">${currentSession ? (currentSession.origin_display || (currentSession.origin_iata ? `${currentSession.origin_iata} (${currentSession.origin_icao || ''})` : (currentSession.origin_icao || 'Unknown'))) : (p.route ? (p.route.origin_iata || p.route.origin_icao || 'Unknown') : 'Unknown')}</div>
+                        </div>
+                        <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border-subtle);">
+                            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); font-weight: 700;">Destination</div>
+                            <div id="profile-route-dest" style="font-size: 14px; font-weight: 700; color: var(--text-primary); margin-top: 4px;">${currentSession ? (currentSession.destination_display || (currentSession.destination_iata ? `${currentSession.destination_iata} (${currentSession.destination_icao || ''})` : (currentSession.destination_icao || 'Unknown'))) : (p.route ? (p.route.destination_iata || p.route.destination_icao || 'Unknown') : 'Unknown')}</div>
+                        </div>
+                        <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border-subtle);">
+                            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); font-weight: 700;">Detected Since</div>
+                            <div style="font-size: 12px; font-weight: 700; color: var(--text-secondary); font-family: var(--font-mono); margin-top: 4px;">${currentSession ? currentSession.started_at_ist : (p.activity_summary ? p.activity_summary.last_seen_ist : 'Live')}</div>
+                        </div>
+                    </div>
+                    ` : `
+                    <div style="text-align: center; padding: 20px; color: var(--text-muted); font-size: 13px;">
+                        Currently not detected
+                    </div>
+                    `}
+                </div>
+            </div>
+
+            <!-- Activity Summary KPI Grid -->
+            <div class="kpi-grid">
+                <div class="kpi-card accent-cyan">
+                    <span class="kpi-title">Visits Today</span>
+                    <span class="kpi-value">${p.activity_summary.visits_today}</span>
+                    <span class="kpi-subtext">Duration: ${p.activity_summary.duration_today}</span>
+                </div>
+                <div class="kpi-card accent-green">
+                    <span class="kpi-title">Visits This Week</span>
+                    <span class="kpi-value">${p.activity_summary.visits_week}</span>
+                    <span class="kpi-subtext">Duration: ${p.activity_summary.duration_week}</span>
+                </div>
+                <div class="kpi-card accent-amber">
+                    <span class="kpi-title">Visits This Month</span>
+                    <span class="kpi-value">${p.activity_summary.visits_month}</span>
+                    <span class="kpi-subtext">Duration: ${p.activity_summary.duration_month}</span>
+                </div>
+                <div class="kpi-card accent-purple">
+                    <span class="kpi-title">Lifetime Visits</span>
+                    <span class="kpi-value">${p.activity_summary.lifetime_visits}</span>
+                    <span class="kpi-subtext">Observations: ${p.activity_summary.lifetime_observations.toLocaleString()}</span>
+                </div>
+                <div class="kpi-card accent-blue">
+                    <span class="kpi-title">Average Visit Duration</span>
+                    <span class="kpi-value">${p.activity_summary.average_visit_duration}</span>
+                    <span class="kpi-subtext">Longest: ${p.activity_summary.longest_visit}</span>
+                </div>
+            </div>
+
+            <!-- Detailed Aircraft Metadata Sections -->
+            <div class="profile-grid-sections">
+                <!-- Identity & Classification -->
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">🪪 Identity & Classification</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div class="info-item-row"><span class="info-label">ICAO Hex</span><span class="info-value mono">${p.identity.icao_hex}</span></div>
+                        <div class="info-item-row"><span class="info-label">Registration</span><span class="info-value mono">${p.identity.registration}</span></div>
+                        <div class="info-item-row"><span class="info-label">Callsign</span><span class="info-value mono">${p.identity.callsign}</span></div>
+                        <div class="info-item-row"><span class="info-label">Aircraft Type</span><span class="info-value">${p.identity.aircraft_type}</span></div>
+                        <div class="info-item-row"><span class="info-label">ICAO Type Code</span><span class="info-value mono">${p.identity.type_code}</span></div>
+                        <div class="info-item-row"><span class="info-label">First Seen</span><span class="info-value">${p.activity_summary.first_seen_ist}</span></div>
+                        <div class="info-item-row"><span class="info-label">Last Observed</span><span class="info-value">${p.activity_summary.last_seen_ist}</span></div>
+                    </div>
+                </div>
+
+                <!-- Manufacturer & Airframe Specs -->
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">🛠 Manufacturer & Airframe</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div class="info-item-row"><span class="info-label">Manufacturer</span><span class="info-value">${p.manufacturer.manufacturer}</span></div>
+                        <div class="info-item-row"><span class="info-label">Model</span><span class="info-value">${p.manufacturer.model}</span></div>
+                        <div class="info-item-row"><span class="info-label">Manufacturer ICAO</span><span class="info-value mono">${p.manufacturer.manufacturer_icao}</span></div>
+                        <div class="info-item-row"><span class="info-label">Serial Number</span><span class="info-value mono">${p.ownership.serial_number}</span></div>
+                        <div class="info-item-row"><span class="info-label">Year Built</span><span class="info-value">${p.history.built}</span></div>
+                        <div class="info-item-row"><span class="info-label">First Flight Date</span><span class="info-value">${p.history.first_flight_date}</span></div>
+                        <div class="info-item-row"><span class="info-label">Data Source</span><span class="info-value">${p.source.source}</span></div>
+                    </div>
+                </div>
+
+                <!-- Operator & Ownership -->
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">🏢 Operator & Fleet</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div class="info-item-row"><span class="info-label">Operator Name</span><span class="info-value">${p.operator.operator}</span></div>
+                        <div class="info-item-row"><span class="info-label">Operator ICAO</span><span class="info-value mono">${p.operator.operator_icao}</span></div>
+                        <div class="info-item-row"><span class="info-label">Operator IATA</span><span class="info-value mono">${p.operator.operator_iata}</span></div>
+                        <div class="info-item-row"><span class="info-label">Registered Owner</span><span class="info-value">${p.ownership.owner}</span></div>
+                        <div class="info-item-row"><span class="info-label">Country</span><span class="info-value">${p.operator.country}</span></div>
+                        <div class="info-item-row"><span class="info-label">Enrichment Source</span><span class="info-value"><a href="${p.source.source_url}" target="_blank">${p.source.source} ↗</a></span></div>
+                    </div>
+                </div>
+
+                <!-- Distance & Compass Direction -->
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">🧭 Distance & Compass Bearing</span>
+                    </div>
+                    <div class="sky-panel-body" style="display: flex; flex-direction: column; align-items: center;">
+                        <div class="compass-rose">
+                            <span class="compass-direction n">N</span>
+                            <span class="compass-direction e">E</span>
+                            <span class="compass-direction s">S</span>
+                            <span class="compass-direction w">W</span>
+                            <div class="compass-needle" style="transform: rotate(${p.bearing_analytics.initial_bearing}deg);"></div>
+                            <div class="compass-center-dot"></div>
+                        </div>
+                        <div style="width: 100%; margin-top: 16px;">
+                            <div class="info-item-row"><span class="info-label">Closest Distance</span><span class="info-value mono" style="color: var(--radar-green); font-weight: 700;">${p.distance_analytics.closest_distance_km} km</span></div>
+                            <div class="info-item-row"><span class="info-label">Farthest Distance</span><span class="info-value mono">${p.distance_analytics.farthest_distance_km} km</span></div>
+                            <div class="info-item-row"><span class="info-label">Average Distance</span><span class="info-value mono">${p.distance_analytics.average_distance_km} km</span></div>
+                            <div class="info-item-row"><span class="info-label">Initial Bearing</span><span class="info-value mono">${p.bearing_analytics.initial_bearing}°</span></div>
+                            <div class="info-item-row"><span class="info-label">Final Bearing</span><span class="info-value mono">${p.bearing_analytics.final_bearing}°</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Route Summary & Repeated Route Analysis -->
+            <div class="sky-panel" style="margin-top: 20px;">
+                <div class="sky-panel-header">
+                    <span class="sky-panel-title">📊 ROUTE SUMMARY & REPEATED ROUTE ANALYSIS</span>
+                </div>
+                <div class="sky-panel-body">
+                    <div class="kpi-grid" style="margin-bottom: 20px;">
+                        <div class="kpi-card accent-cyan">
+                            <span class="kpi-title">Unique Routes</span>
+                            <span class="kpi-value" style="font-size: 22px;">${routeSummary.unique_routes_count}</span>
+                        </div>
+                        <div class="kpi-card accent-green">
+                            <span class="kpi-title">Observed Sessions with Route</span>
+                            <span class="kpi-value" style="font-size: 22px;">${routeSummary.observed_sessions_count}</span>
+                        </div>
+                        <div class="kpi-card accent-amber">
+                            <span class="kpi-title">Days Observed</span>
+                            <span class="kpi-value" style="font-size: 22px;">${routeSummary.days_observed_count}</span>
+                        </div>
+                    </div>
+
+                    <h4 style="font-size: 13px; font-weight: 700; color: var(--text-secondary); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px;">Most Observed Routes</h4>
+                    <div class="table-responsive">
+                        <table class="sky-table" style="font-size: 12px;">
+                            <thead>
+                                <tr>
+                                    <th>Route</th>
+                                    <th>Times Seen</th>
+                                    <th>First Seen</th>
+                                    <th>Last Seen</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${mostObserved.length === 0 ? `<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 16px;">No repeated route history recorded yet.</td></tr>` :
+                                    mostObserved.map(m => `
+                                    <tr>
+                                        <td class="mono" style="font-weight: 700; color: var(--radar-cyan);">${m.route}</td>
+                                        <td class="mono" style="font-weight: 700;">${m.session_count} session${m.session_count === 1 ? '' : 's'}</td>
+                                        <td class="mono">${m.first_observed_ist}</td>
+                                        <td class="mono">${m.last_observed_ist}</td>
+                                    </tr>
+                                `).join("")}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="margin-top: 12px; font-size: 11px; color: var(--text-muted); font-style: italic;">
+                        * Important: These statistics represent routes observed by THIS SkyAlert receiver.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Route History Table -->
+            <div class="sky-panel" style="margin-top: 20px;">
+                <div class="sky-panel-header">
+                    <span class="sky-panel-title">🗺️ ROUTE HISTORY (${routeHistory.length} Sessions)</span>
+                </div>
+                <div class="sky-panel-body">
+                    <div class="table-responsive">
+                        <table class="sky-table" style="font-size: 12px;">
+                            <thead>
+                                <tr>
+                                    <th>Date / Time (IST)</th>
+                                    <th>Callsign</th>
+                                    <th>Route</th>
+                                    <th>Duration</th>
+                                    <th>Observations</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${routeHistory.length === 0 ? `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 20px;">No historical flight routes recorded for this aircraft.</td></tr>` :
+                                    routeHistory.map(rh => `
+                                    <tr>
+                                        <td class="mono" style="font-weight: 600;">${rh.started_at_ist}</td>
+                                        <td class="mono" style="font-weight: 700; color: var(--text-primary);">${rh.callsign}</td>
+                                        <td class="mono" style="font-weight: 700; color: var(--radar-cyan);">${rh.route}</td>
+                                        <td class="mono" style="color: var(--radar-green);">${rh.duration}</td>
+                                        <td class="mono">${rh.observation_count.toLocaleString()}</td>
+                                        <td>
+                                            <button class="sky-btn" style="padding: 4px 10px; font-size: 11px;" onclick="window.SkyAlertApp.openSessionDetailModal(${rh.id})">
+                                                Details ↗
+                                            </button>
+                                        </td>
+                                    </tr>
+                                `).join("")}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ADS-B Telemetry & Flight Data (Latest Observation) -->
+            ${telemetryRows.length > 0 ? `
+            <div class="sky-panel" style="margin-top: 20px;">
+                <div class="sky-panel-header">
+                    <span class="sky-panel-title">📡 ADS-B Telemetry & Flight Data (Latest Observation)</span>
+                </div>
+                <div class="sky-panel-body">
+                    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px;">
+                        ${telemetryRows.map(r => `
+                            <div class="info-item-row" style="background: var(--bg-secondary); padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border-subtle);">
+                                <span class="info-label" style="font-weight: 600;">${r.label}</span>
+                                <span class="info-value mono" style="color: var(--radar-cyan); font-weight: 700;">${r.val}</span>
+                            </div>
+                        `).join("")}
+                    </div>
+                </div>
+            </div>
+            ` : ''}
+
+            <!-- Historical Telemetry Trends -->
+            ${tHistory.length > 0 ? `
+            <div class="sky-panel" style="margin-top: 20px;">
+                <div class="sky-panel-header">
+                    <span class="sky-panel-title">📈 Historical Telemetry Trends (${tHistory.length} Recent Points)</span>
+                </div>
+                <div class="sky-panel-body">
+                    <div class="table-responsive">
+                        <table class="sky-table" style="font-size: 12px;">
+                            <thead>
+                                <tr>
+                                    <th>Timestamp (IST)</th>
+                                    <th>Altitude (ft)</th>
+                                    <th>Ground Speed</th>
+                                    <th>Track / Course</th>
+                                    <th>Temp (OAT)</th>
+                                    <th>Wind Speed (m/s)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${tHistory.map(h => `
+                                    <tr>
+                                        <td class="mono">${h.time_ist}</td>
+                                        <td class="mono" style="color: var(--radar-cyan); font-weight: 600;">${h.altitude_ft.toLocaleString()} ft</td>
+                                        <td class="mono">${h.speed_kmh} km/h (${h.ground_speed_kts} kts)</td>
+                                        <td class="mono">${h.track}°</td>
+                                        <td class="mono" style="color: var(--radar-amber);">${h.oat_c}°C</td>
+                                        <td class="mono" style="color: var(--radar-green);">${h.wind_direction}° / ${h.wind_speed_ms} m/s</td>
+                                    </tr>
+                                `).join("")}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            ` : ''}
+
+            <!-- Visit History & Interactive Timeline -->
+            <div class="sky-panel">
+                <div class="sky-panel-header">
+                    <span class="sky-panel-title">🕒 Detection Sessions & Visits History (${sessions.length} Visits)</span>
+                </div>
+                <div class="sky-panel-body">
+                    <div class="table-responsive">
+                        <table class="sky-table">
+                            <thead>
+                                <tr>
+                                    <th>Date</th>
+                                    <th>Time Interval (IST)</th>
+                                    <th>Route</th>
+                                    <th>Duration</th>
+                                    <th>Observations</th>
+                                    <th>Distance (First → Last)</th>
+                                    <th>Bearing</th>
+                                    <th>Status</th>
+                                    <th>Details</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${sessions.length === 0 ? `<tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 20px;">No visit sessions recorded.</td></tr>` : 
+                                    sessions.map(s => {
+                                        const routeStr = s.origin_iata && s.destination_iata
+                                            ? `${s.origin_iata} → ${s.destination_iata}`
+                                            : s.origin_icao && s.destination_icao
+                                                ? `${s.origin_icao} → ${s.destination_icao}`
+                                                : 'Route unavailable';
+                                        return `
+                                        <tr>
+                                            <td style="font-weight: 600;">${s.date}</td>
+                                            <td class="mono">${s.time_range}</td>
+                                            <td class="mono" style="font-weight: 700; color: var(--radar-cyan);">${routeStr}</td>
+                                            <td class="mono" style="font-weight: 700; color: var(--radar-green);">${s.duration}</td>
+                                            <td class="mono">${s.observation_count.toLocaleString()}</td>
+                                            <td class="mono">${s.first_distance_km || '-'} km → ${s.last_distance_km || '-'} km</td>
+                                            <td class="mono">${s.first_bearing || '-'}° → ${s.last_bearing || '-'}°</td>
+                                            <td><span class="live-badge ${s.status === 'ACTIVE' ? 'live' : 'recent'}">${s.status}</span></td>
+                                            <td>
+                                                <button class="sky-btn" onclick="window.SkyAlertApp.openSessionDetailModal(${s.id})">
+                                                    Inspect ↗
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    `;}).join("")}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            ${(p.frequent_routes && p.frequent_routes.length > 0) ? `
+            <!-- Frequent Routes (DB Source of Truth) -->
+            <div class="sky-panel" style="margin-top: 16px;">
+                <div class="sky-panel-header">
+                    <span class="sky-panel-title">🗺️ Observed Route Patterns (${p.frequent_routes.length} Routes)</span>
+                    <span style="font-size: 11px; color: var(--text-muted);">From our detection database</span>
+                </div>
+                <div class="sky-panel-body">
+                    <div class="table-responsive">
+                        <table class="sky-table">
+                            <thead>
+                                <tr>
+                                    <th>Route</th>
+                                    <th>Origin ICAO</th>
+                                    <th>Destination ICAO</th>
+                                    <th style="text-align: center;">Times Observed</th>
+                                    <th>First Detected</th>
+                                    <th>Last Detected</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${p.frequent_routes.map((r, idx) => `
+                                <tr>
+                                    <td class="mono" style="font-weight: 700; color: ${idx === 0 ? 'var(--radar-cyan)' : 'var(--text-primary)'}; font-size: 15px;">
+                                        ${r.route}
+                                    </td>
+                                    <td class="mono" style="color: var(--text-secondary);">${r.origin_icao || '-'}</td>
+                                    <td class="mono" style="color: var(--text-secondary);">${r.destination_icao || '-'}</td>
+                                    <td style="text-align: center;">
+                                        <span class="live-badge recent" style="font-size: 12px; padding: 3px 10px;">${r.session_count} session${r.session_count !== 1 ? 's' : ''}</span>
+                                    </td>
+                                    <td class="mono" style="font-size: 11px; color: var(--text-muted);">${r.first_detected}</td>
+                                    <td class="mono" style="font-size: 11px; color: var(--text-muted);">${r.last_detected}</td>
+                                </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            ` : ''}
+        `;
+
+        this.enrichAircraftProfileRoute(p.callsign || (p.identity ? p.identity.callsign : ""), p.icao_hex);
+    }
+
+
+    async openSessionDetailModal(sessionId) {
+        const modal = document.getElementById("session-detail-modal");
+        const body = document.getElementById("session-modal-content");
+        if (!modal || !body) return;
+
+        body.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--text-muted);">Loading Session #${sessionId} Telemetry Track...</div>`;
+        modal.classList.add("open");
+
+        try {
+            const res = await fetch(`/api/sessions/${sessionId}`);
+            const data = await res.json();
+
+            body.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 12px;">
+                    <div>
+                        <h2 style="font-size: 20px; font-weight: 700; color: var(--radar-cyan);">${data.callsign} (${data.registration})</h2>
+                        <div style="font-size: 12px; color: var(--text-muted);">${data.manufacturer} ${data.model} · ${data.operator}</div>
+                    </div>
+                    <div style="text-align: right;">
+                        <span class="live-badge ${data.status === 'ACTIVE' ? 'live' : 'recent'}">${data.status}</span>
+                        <div style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); margin-top: 4px;">Session ID: #${data.id}</div>
+                    </div>
+                </div>
+
+                <div class="kpi-grid" style="margin-bottom: 20px;">
+                    <div class="kpi-card accent-cyan">
+                        <span class="kpi-title">Duration</span>
+                        <span class="kpi-value" style="font-size: 20px;">${data.duration}</span>
+                    </div>
+                    <div class="kpi-card accent-green">
+                        <span class="kpi-title">Observations</span>
+                        <span class="kpi-value" style="font-size: 20px;">${data.observation_count}</span>
+                    </div>
+                    <div class="kpi-card accent-amber">
+                        <span class="kpi-title">Distance Range</span>
+                        <span class="kpi-value" style="font-size: 16px;">${data.first_distance_km || '-'} → ${data.last_distance_km || '-'} km</span>
+                    </div>
+                    <div class="kpi-card accent-purple">
+                        <span class="kpi-title">Bearing Range</span>
+                        <span class="kpi-value" style="font-size: 16px;">${data.first_bearing || '-'}° → ${data.last_bearing || '-'}°</span>
+                    </div>
+                </div>
+
+                <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 10px;">Observation Telemetry Track</h3>
+                <div class="table-responsive" style="max-height: 280px; overflow-y: auto;">
+                    <table class="sky-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp (IST)</th>
+                                <th>Altitude (Baro)</th>
+                                <th>Speed</th>
+                                <th>Heading</th>
+                                <th>Distance</th>
+                                <th>Bearing</th>
+                                <th>Coordinates</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${data.track.length === 0 ? `<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">No individual positional telemetry points recorded for this pass.</td></tr>` :
+                                data.track.map(t => `
+                                <tr>
+                                    <td class="mono" style="font-size: 11px;">${t.timestamp_ist}</td>
+                                    <td class="mono">${t.altitude_baro ? t.altitude_baro.toLocaleString() + ' ft' : '-'}</td>
+                                    <td class="mono">${t.ground_speed_kts ? Math.round(t.ground_speed_kts * 1.852) + ' km/h' : (t.speed_kmh ? Math.round(t.speed_kmh) + ' km/h' : '-')}</td>
+                                    <td class="mono">${t.track ? t.track + '°' : '-'}</td>
+                                    <td class="mono">${t.distance_km ? t.distance_km + ' km' : '-'}</td>
+                                    <td class="mono">${t.bearing ? t.bearing + '°' : '-'}</td>
+                                    <td class="mono" style="font-size: 11px;">${t.latitude ? t.latitude.toFixed(4) + ', ' + t.longitude.toFixed(4) : '-'}</td>
+                                </tr>
+                            `).join("")}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        } catch (e) {
+            body.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--radar-red);">Failed to load session details.</div>`;
+        }
+    }
+
+    async triggerEnrichment(hex) {
+        try {
+            const res = await fetch(`/api/aircraft/${hex}/enrich`, { method: "POST" });
+            const data = await res.json();
+            if (data.status === "success") {
+                alert(`Enrichment updated for ${hex}`);
+                this.openAircraftProfile(hex);
+            } else {
+                alert(`Enrichment notice: ${data.message}`);
+            }
+        } catch (e) {
+            alert(`Error triggering enrichment: ${e}`);
+        }
+    }
+
+    async renderTrafficChart() {
+        try {
+            const res = await fetch("/api/analytics/traffic");
+            const data = await res.json();
+            const canvas = document.getElementById("traffic-24h-chart");
+            if (!canvas) return;
+
+            if (this.trafficChart) this.trafficChart.destroy();
+
+            const ctx = canvas.getContext("2d");
+            this.trafficChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.labels,
+                    datasets: [
+                        {
+                            label: 'Aircraft Count',
+                            data: data.aircraft,
+                            backgroundColor: 'rgba(56, 189, 248, 0.6)',
+                            borderColor: '#38bdf8',
+                            borderWidth: 1,
+                            borderRadius: 4
+                        },
+                        {
+                            label: 'Visits / Sessions',
+                            data: data.visits,
+                            backgroundColor: 'rgba(34, 197, 94, 0.6)',
+                            borderColor: '#22c55e',
+                            borderWidth: 1,
+                            borderRadius: 4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#94a3b8', font: { family: 'Inter', size: 11 } }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                            ticks: { color: '#64748b', font: { family: 'JetBrains Mono', size: 10 } }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                            ticks: { color: '#64748b', font: { family: 'JetBrains Mono', size: 10 } }
+                        }
+                    }
+                }
+            });
+        } catch (e) {
+            console.error("Traffic chart error:", e);
+        }
+    }
+
+    async loadSessionsView() {
+        const tbody = document.getElementById("global-sessions-table-body");
+        if (!tbody) return;
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--text-muted);">Loading station visit sessions...</td></tr>`;
+
+        try {
+            const res = await fetch("/api/aircraft/1/sessions?limit=50"); // Fetch global sessions
+            const sessions = await res.json();
+            if (sessions.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--text-muted);">No visits recorded yet.</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = sessions.map(s => `
+                <tr>
+                    <td style="font-weight: 600;">${s.date}</td>
+                    <td class="mono">${s.time_range}</td>
+                    <td class="mono" style="font-weight: 700; color: var(--radar-cyan);">${s.duration}</td>
+                    <td class="mono">${s.observation_count}</td>
+                    <td class="mono">${s.first_distance_km || '-'} km → ${s.last_distance_km || '-'} km</td>
+                    <td class="mono">${s.first_bearing || '-'}° → ${s.last_bearing || '-'}°</td>
+                    <td><span class="live-badge ${s.status === 'ACTIVE' ? 'live' : 'recent'}">${s.status}</span></td>
+                    <td><button class="sky-btn" onclick="window.SkyAlertApp.openSessionDetailModal(${s.id})">Inspect ↗</button></td>
+                </tr>
+            `).join("");
+        } catch (e) {
+            tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--radar-red);">Failed to load sessions.</td></tr>`;
+        }
+    }
+
+    async loadAnalyticsView() {
+        this.renderTrafficChart();
+        try {
+            const [opsRes, typesRes] = await Promise.all([
+                fetch("/api/analytics/operators"),
+                fetch("/api/analytics/types")
+            ]);
+            const operators = await opsRes.json();
+            const types = await typesRes.json();
+
+            const opsTable = document.getElementById("analytics-top-operators-table");
+            if (opsTable) {
+                opsTable.innerHTML = operators.slice(0, 10).map((op, idx) => `
+                    <tr>
+                        <td class="mono" style="color: var(--radar-cyan); font-weight: 700;">#${idx+1}</td>
+                        <td style="font-weight: 600;">${op.operator}</td>
+                        <td class="mono">${op.operator_icao}</td>
+                        <td>${op.country}</td>
+                        <td class="mono" style="font-weight: 700;">${op.aircraft_count}</td>
+                        <td class="mono" style="color: var(--radar-cyan); font-weight: 700;">${op.unique_flights || op.aircraft_count}</td>
+                        <td class="mono" style="color: var(--radar-green); font-weight: 700;">${op.total_visits}</td>
+                        <td class="mono">${op.average_visit_duration}</td>
+                    </tr>
+                `).join("");
+            }
+
+            const typesTable = document.getElementById("analytics-top-types-table");
+            if (typesTable) {
+                typesTable.innerHTML = types.slice(0, 10).map((t, idx) => `
+                    <tr>
+                        <td class="mono" style="color: var(--radar-cyan); font-weight: 700;">#${idx+1}</td>
+                        <td class="mono" style="font-weight: 700; color: var(--radar-cyan);">${t.type_code}</td>
+                        <td>${t.model}</td>
+                        <td>${t.manufacturer}</td>
+                        <td class="mono" style="font-weight: 700;">${t.aircraft_count}</td>
+                        <td class="mono" style="color: var(--radar-cyan); font-weight: 700;">${t.unique_flights || t.aircraft_count}</td>
+                        <td class="mono" style="color: var(--radar-green); font-weight: 700;">${t.total_visits}</td>
+                        <td class="mono">${t.average_visit_duration}</td>
+                    </tr>
+                `).join("");
+            }
+        } catch (e) {
+            console.error("Analytics error:", e);
+        }
+    }
+
+    setOperatorTimeframe(tf) {
+        this.operatorTimeframe = tf;
+        document.querySelectorAll('.operator-time-btn').forEach(btn => {
+            if (btn.dataset.timeframe === tf) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+        this.loadOperatorsView();
+    }
+
+    async loadOperatorsView() {
+        const container = document.getElementById("operators-grid-container");
+        if (!container) return;
+        container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">Loading operator intelligence (${this.operatorTimeframe})...</div>`;
+
+        try {
+            const res = await fetch(`/api/analytics/operators?timeframe=${this.operatorTimeframe}`);
+            const operators = await res.json();
+            if (!operators || operators.length === 0) {
+                container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">No operator records found for this timeframe.</div>`;
+                return;
+            }
+            container.innerHTML = operators.map(op => `
+                <div class="sky-panel" style="padding: 18px; border-top: 3px solid var(--radar-cyan);">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 4px;">
+                        <div style="font-size: 16px; font-weight: 700; color: var(--text-primary);">${op.operator}</div>
+                        <span style="font-size: 11px; font-family: var(--font-mono); color: var(--radar-cyan); background: rgba(56,189,248,0.12); padding: 2px 6px; border-radius: 4px;">${op.operator_icao}</span>
+                    </div>
+                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 12px;">🌐 ${op.country}</div>
+                    <div class="info-item-row"><span class="info-label">Unique Aircraft</span><span class="info-value mono" style="font-weight: 700;">${op.aircraft_count} Planes</span></div>
+                    <div class="info-item-row"><span class="info-label">Unique Flights</span><span class="info-value mono" style="color: var(--radar-cyan); font-weight: 700;">${op.unique_flights || op.aircraft_count} Callsigns</span></div>
+                    <div class="info-item-row"><span class="info-label">Total Visits</span><span class="info-value mono" style="color: var(--radar-green); font-weight: 700;">${op.total_visits} Sessions</span></div>
+                    <div class="info-item-row"><span class="info-label">Total Observations</span><span class="info-value mono">${op.total_observations.toLocaleString()}</span></div>
+                    <div class="info-item-row"><span class="info-label">Avg Visit Duration</span><span class="info-value mono">${op.average_visit_duration}</span></div>
+                </div>
+            `).join("");
+        } catch (e) {
+            console.error("Operator Intelligence load error:", e);
+            container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--radar-red);">Failed to load operator intelligence.</div>`;
+        }
+    }
+
+    async loadFleetView() {
+        const container = document.getElementById("fleet-grid-container");
+        if (!container) return;
+        container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">Loading fleet analytics...</div>`;
+
+        try {
+            const res = await fetch("/api/analytics/fleet");
+            const data = await res.json();
+            const operators = data.operators || [];
+            if (!operators || operators.length === 0) {
+                container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">No fleet records found.</div>`;
+                return;
+            }
+            container.innerHTML = operators.map(op => `
+                <div class="sky-panel" style="padding: 18px; border-top: 3px solid var(--radar-green);">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 4px;">
+                        <div style="font-size: 16px; font-weight: 700; color: var(--text-primary);">${op.operator}</div>
+                        <span style="font-size: 11px; font-family: var(--font-mono); color: var(--radar-green); background: rgba(34,197,94,0.12); padding: 2px 6px; border-radius: 4px;">${op.operator_icao}</span>
+                    </div>
+                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 12px;">🌐 ${op.country}</div>
+                    <div class="info-item-row"><span class="info-label">Active Airframes</span><span class="info-value mono" style="font-weight: 700;">${op.aircraft_count} Planes</span></div>
+                    <div class="info-item-row"><span class="info-label">Unique Flights</span><span class="info-value mono" style="color: var(--radar-cyan); font-weight: 700;">${op.unique_flights || op.aircraft_count} Callsigns</span></div>
+                    <div class="info-item-row"><span class="info-label">Total Visits</span><span class="info-value mono" style="color: var(--radar-green); font-weight: 700;">${op.total_visits} Sessions</span></div>
+                    <div class="info-item-row"><span class="info-label">Avg Turnaround / Duration</span><span class="info-value mono">${op.average_visit_duration}</span></div>
+                    ${op.top_aircraft && op.top_aircraft.length > 0 ? `
+                    <div style="margin-top: 10px; font-size: 11px; color: var(--text-muted);">
+                        Key Fleet: ${op.top_aircraft.map(ac => `<span style="font-family: monospace; color: var(--radar-cyan);">${ac.reg || ac.hex}</span> (${ac.type || 'N/A'})`).join(', ')}
+                    </div>
+                    ` : ''}
+                </div>
+            `).join("");
+        } catch (e) {
+            console.error("Fleet Analytics load error:", e);
+            container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--radar-red);">Failed to load fleet analytics.</div>`;
+        }
+    }
+
+    async loadTypesView() {
+        const container = document.getElementById("types-grid-container");
+        if (!container) return;
+        container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">Loading aircraft type intelligence...</div>`;
+
+        try {
+            const res = await fetch("/api/analytics/types");
+            const types = await res.json();
+            container.innerHTML = types.map(t => `
+                <div class="sky-panel" style="padding: 18px;">
+                    <div style="font-size: 18px; font-weight: 800; font-family: var(--font-mono); color: var(--radar-cyan); margin-bottom: 4px;">${t.type_code}</div>
+                    <div style="font-size: 13px; color: var(--text-primary); font-weight: 600; margin-bottom: 12px;">${t.manufacturer} ${t.model}</div>
+                    <div class="info-item-row"><span class="info-label">Unique Aircraft</span><span class="info-value mono" style="font-weight: 700;">${t.aircraft_count} Planes</span></div>
+                    <div class="info-item-row"><span class="info-label">Unique Flights</span><span class="info-value mono" style="color: var(--radar-cyan); font-weight: 700;">${t.unique_flights || t.aircraft_count} Callsigns</span></div>
+                    <div class="info-item-row"><span class="info-label">Total Visits</span><span class="info-value mono" style="color: var(--radar-green); font-weight: 700;">${t.total_visits} Sessions</span></div>
+                    <div class="info-item-row"><span class="info-label">Total Observations</span><span class="info-value mono">${t.total_observations.toLocaleString()}</span></div>
+                    <div class="info-item-row"><span class="info-label">Avg Session Duration</span><span class="info-value mono">${t.average_visit_duration}</span></div>
+                </div>
+            `).join("");
+        } catch (e) {
+            container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--radar-red);">Failed to load aircraft types.</div>`;
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Formation Detection & Live Airspace Intelligence
+    // ────────────────────────────────────────────────────────────────
+
+    async loadFormationView(forceRefresh = false) {
+        const anomEl = document.getElementById("formation-anomalies-container");
+        const pairsEl = document.getElementById("formation-pairs-container");
+        const rareEl = document.getElementById("formation-rare-container");
+        if (!anomEl || !pairsEl || !rareEl) return;
+
+        const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+
+        if (!forceRefresh) {
+            anomEl.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--text-muted);">Scanning live feed for anomalies...</div>`;
+            pairsEl.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--text-muted);">Analyzing proximity of tracked aircraft...</div>`;
+            rareEl.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--text-muted);">Identifying new and special aircraft...</div>`;
+        }
+
+        try {
+            const res = await fetch("/api/live");
+            if (!res.ok) throw new Error(`Network error ${res.status}`);
+            const data = await res.json();
+            const aircraft = Array.isArray(data.aircraft) ? data.aircraft : [];
+            const formations = Array.isArray(data.formations) ? data.formations : [];
+
+            // ── Anomalies & emergencies ────────────────────────────
+            const flagged = [];
+            for (const p of aircraft) {
+                const anomalies = Array.isArray(p.anomalies) ? p.anomalies : [];
+                for (const a of anomalies) flagged.push({ plane: p, anomaly: a });
+            }
+            const high = flagged.filter(f => f.anomaly.priority === "HIGH");
+            const medium = flagged.filter(f => f.anomaly.priority === "MEDIUM");
+            const low = flagged.filter(f => f.anomaly.priority === "LOW");
+            const ordered = [...high, ...medium, ...low];
+
+            setText("formation-sum-anomalies", high.length + medium.length);
+            setText("formation-sum-formations", formations.length);
+            setText("formation-sum-total", data.count ?? aircraft.length);
+            if (data.station_time) setText("formation-station-time", data.station_time);
+
+            if (ordered.length === 0) {
+                anomEl.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--text-muted);">✅ No anomalies or emergency squawks detected in the current feed.</div>`;
+            } else {
+                const prioStyle = {
+                    HIGH:   { color: "var(--radar-red)",   icon: "🚨", label: "HIGH" },
+                    MEDIUM: { color: "var(--radar-amber)", icon: "⚠️", label: "MEDIUM" },
+                    LOW:    { color: "var(--radar-cyan)",  icon: "ℹ️", label: "LOW" }
+                };
+                anomEl.innerHTML = ordered.map(({ plane: p, anomaly: a }) => {
+                    const st = prioStyle[a.priority] || prioStyle.LOW;
+                    const hex = p.icao_hex || "";
+                    const cs = (p.callsign && p.callsign !== "-") ? p.callsign : hex;
+                    const phase = p.flight_phase ? p.flight_phase.label : "Unknown";
+                    return `
+                    <div class="sky-panel" style="padding: 16px; border-top: 3px solid ${st.color}; cursor: pointer;" onclick="window.SkyAlertApp.openAircraftProfile('${hex}')">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 6px;">
+                            <div style="font-size: 16px; font-weight: 800; font-family: var(--font-mono); color: var(--text-primary);">${cs}</div>
+                            <span style="font-size: 11px; font-weight: 700; color: ${st.color};">${st.icon} ${st.label}</span>
+                        </div>
+                        <div style="font-size: 13px; font-weight: 700; color: ${st.color}; margin-bottom: 4px;">${a.title}</div>
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">${a.desc}</div>
+                        <div class="info-item-row"><span class="info-label">Aircraft</span><span class="info-value mono">${p.registration || hex} · ${p.aircraft_type || 'N/A'}</span></div>
+                        <div class="info-item-row"><span class="info-label">Squawk</span><span class="info-value mono" style="color: ${st.color};">${p.squawk || '-'}</span></div>
+                        <div class="info-item-row"><span class="info-label">Phase</span><span class="info-value">${phase}</span></div>
+                    </div>`;
+                }).join("");
+            }
+
+            // ── Formations / escort pairs ──────────────────────────
+            if (formations.length === 0) {
+                pairsEl.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--text-muted);">No formation or escort pairs detected right now.</div>`;
+            } else {
+                pairsEl.innerHTML = formations.map(f => {
+                    const isEscort = f.type === "FORMATION_ESCORT";
+                    const c = isEscort ? "var(--radar-red)" : "var(--radar-cyan)";
+                    const label = isEscort ? "🛫 FORMATION / ESCORT" : "✈️ PROXIMITY PAIR";
+                    return `
+                    <div class="sky-panel" style="padding: 16px; border-top: 3px solid ${c};">
+                        <div style="font-size: 11px; font-weight: 700; color: ${c}; letter-spacing: 0.5px; margin-bottom: 8px;">${label}</div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px;">
+                            <span class="mono" style="font-weight: 700; color: var(--text-primary); cursor: pointer;" onclick="window.SkyAlertApp.openAircraftProfile('${f.hex_1}')">${f.aircraft_1}</span>
+                            <span style="color: var(--text-muted);">⇄</span>
+                            <span class="mono" style="font-weight: 700; color: var(--text-primary); cursor: pointer;" onclick="window.SkyAlertApp.openAircraftProfile('${f.hex_2}')">${f.aircraft_2}</span>
+                        </div>
+                        <div class="info-item-row"><span class="info-label">Lateral Separation</span><span class="info-value mono" style="color: ${c}; font-weight: 700;">${f.distance_km} km</span></div>
+                        <div class="info-item-row"><span class="info-label">Vertical Separation</span><span class="info-value mono">${f.vertical_separation_ft} ft</span></div>
+                    </div>`;
+                }).join("");
+            }
+
+            // ── First sightings / rare & special ───────────────────
+            const isSpecial = (p) => {
+                // Note: ADS-B category A5 = "Heavy" (large airliners), NOT military.
+                // Rely on operator/owner keywords only to avoid false positives.
+                const op = ((p.operator || "") + " " + (p.owner || "")).toUpperCase();
+                return /\b(AIR\s+FORCE|MILITARY|GOVERNMENT|ARMY|NAVY|NAVAL|POLICE|COAST\s+GUARD|BORDER|PATROL)\b/.test(op);
+            };
+            const rare = aircraft
+                .map(p => ({ p, visits: p.total_sessions ?? p.lifetime_visits ?? 0 }))
+                .filter(r => r.visits <= 3 || isSpecial(r.p))
+                .sort((a, b) => a.visits - b.visits);
+
+            setText("formation-sum-rare", rare.length);
+
+            if (rare.length === 0) {
+                rareEl.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--text-muted);">No new, rare, or special aircraft in the current feed.</div>`;
+            } else {
+                rareEl.innerHTML = rare.map(({ p, visits }) => {
+                    const hex = p.icao_hex || "";
+                    const cs = (p.callsign && p.callsign !== "-") ? p.callsign : hex;
+                    const firstEver = visits <= 1;
+                    const special = isSpecial(p);
+                    const badge = firstEver
+                        ? `<span style="font-size: 11px; font-weight: 700; color: var(--radar-amber);">✨ FIRST SIGHTING</span>`
+                        : `<span style="font-size: 11px; font-weight: 700; color: var(--radar-cyan);">✦ RARE</span>`;
+                    return `
+                    <div class="sky-panel" style="padding: 16px; border-top: 3px solid ${firstEver ? 'var(--radar-amber)' : 'var(--radar-cyan)'}; cursor: pointer;" onclick="window.SkyAlertApp.openAircraftProfile('${hex}')">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 6px;">
+                            <div style="font-size: 16px; font-weight: 800; font-family: var(--font-mono); color: var(--text-primary);">${cs}</div>
+                            ${badge}
+                        </div>
+                        ${special ? `<div style="font-size: 11px; font-weight: 700; color: var(--radar-red); margin-bottom: 4px;">⭐ SPECIAL / MILITARY INTEREST</div>` : ''}
+                        <div class="info-item-row"><span class="info-label">Aircraft</span><span class="info-value mono">${p.registration || hex} · ${p.aircraft_type || 'N/A'}</span></div>
+                        <div class="info-item-row"><span class="info-label">Operator</span><span class="info-value">${p.operator || 'Unknown'}</span></div>
+                        <div class="info-item-row"><span class="info-label">Lifetime Visits</span><span class="info-value mono" style="color: var(--radar-amber); font-weight: 700;">${visits}</span></div>
+                        <div class="info-item-row"><span class="info-label">First Seen</span><span class="info-value">${p.first_seen_ist || '—'}</span></div>
+                    </div>`;
+                }).join("");
+            }
+        } catch (e) {
+            console.error("Formation view load error:", e);
+            anomEl.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--radar-red);">Failed to load live intelligence feed.</div>`;
+            pairsEl.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--radar-red);">Failed to load formations.</div>`;
+            rareEl.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--radar-red);">Failed to load rare aircraft.</div>`;
+        }
+    }
+
+    async loadUnknownView() {
+        const tbody = document.getElementById("unknown-table-body");
+        if (!tbody) return;
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 30px; color: var(--text-muted);">Scanning un-enriched aircraft...</td></tr>`;
+
+        try {
+            const res = await fetch("/api/unknown");
+            const unknown = await res.json();
+            if (unknown.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 30px; color: var(--radar-green);">All aircraft in database are fully enriched!</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = unknown.map(u => `
+                <tr>
+                    <td class="mono" style="font-weight: 700; color: var(--radar-cyan);">${u.icao_hex}</td>
+                    <td class="mono">${u.callsign}</td>
+                    <td style="font-size: 12px; color: var(--text-muted);">${u.first_seen_ist}</td>
+                    <td style="font-size: 12px; color: var(--text-muted);">${u.last_seen_ist}</td>
+                    <td class="mono">${u.visits}</td>
+                    <td class="mono">${u.observations}</td>
+                    <td>
+                        <button class="sky-btn primary" onclick="window.SkyAlertApp.triggerEnrichment('${u.icao_hex}')">
+                            ⚡ Enrich Aircraft
+                        </button>
+                    </td>
+                </tr>
+            `).join("");
+        } catch (e) {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 30px; color: var(--radar-red);">Failed to load unknown aircraft.</td></tr>`;
+        }
+    }
+
+    openSearchModal() {
+        const modal = document.getElementById("global-search-modal");
+        const input = document.getElementById("modal-search-field");
+        if (modal) modal.classList.add("open");
+        if (input) {
+            input.value = "";
+            setTimeout(() => input.focus(), 100);
+        }
+    }
+
+    async performSearch(query) {
+        const list = document.getElementById("modal-search-results-list");
+        if (!list) return;
+        if (!query || query.trim().length === 0) {
+            list.innerHTML = "";
+            return;
+        }
+
+        list.innerHTML = `<div style="text-align: center; padding: 20px; color: var(--text-muted);">Searching aircraft records...</div>`;
+
+        try {
+            const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+            const data = await res.json();
+
+            if (!data.results || data.results.length === 0) {
+                list.innerHTML = `<div style="text-align: center; padding: 20px; color: var(--text-muted);">No matching aircraft found for "${query}".</div>`;
+                return;
+            }
+
+            list.innerHTML = data.results.map(r => `
+                <div class="search-result-item" onclick="window.SkyAlertApp.closeAllModals(); window.SkyAlertApp.openAircraftProfile('${r.icao_hex}')">
+                    <div style="display: flex; flex-direction: column;">
+                        <div style="font-weight: 700; font-family: var(--font-mono); color: var(--radar-cyan);">
+                            ${r.registration} · ${r.callsign}
+                            <span style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">${r.icao_hex}</span>
+                        </div>
+                        <div style="font-size: 12px; color: var(--text-primary);">${r.manufacturer} ${r.model} (${r.aircraft_type})</div>
+                        <div style="font-size: 11px; color: var(--text-muted);">${r.operator} · ${r.country}</div>
+                    </div>
+                    <div style="text-align: right; font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);">
+                        <div>${r.total_sessions} Visits</div>
+                        <div>${r.last_seen_ist}</div>
+                    </div>
+                </div>
+            `).join("");
+        } catch (e) {
+            list.innerHTML = `<div style="text-align: center; padding: 20px; color: var(--radar-red);">Search failed.</div>`;
+        }
+    }
+
+    closeAllModals() {
+        document.querySelectorAll(".sky-modal-backdrop").forEach(m => m.classList.remove("open"));
+    }
+    setRareViewMode(mode) {
+        this.rareViewMode = mode;
+        document.querySelectorAll('.rare-layout-btn').forEach(btn => {
+            if (btn.dataset.mode === mode) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+        this.loadRareAircraft(this.rareVisitsFilter);
+    }
+
+    setRareVisitsFilter(visits) {
+        this.rareVisitsFilter = visits;
+        document.querySelectorAll('.rare-filter-btn').forEach(btn => {
+            if (parseInt(btn.dataset.visits) === visits) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+        this.loadRareAircraft(visits);
+    }
+
+    async loadRareAircraft(maxVisits, forceRefresh = false) {
+        const loadingEl = document.getElementById('rare-loading-indicator');
+        const errorEl = document.getElementById('rare-error-state');
+        const emptyEl = document.getElementById('rare-empty-state');
+        const gridEl = document.getElementById('rare-aircraft-cards-grid');
+
+        if (!forceRefresh) {
+            if (loadingEl) loadingEl.style.display = 'block';
+            if (errorEl) errorEl.style.display = 'none';
+            if (emptyEl) emptyEl.style.display = 'none';
+            if (gridEl) gridEl.innerHTML = '';
+        }
+
+        try {
+            const res = await fetch(`/api/rare-aircraft?max_visits=${maxVisits}`);
+            if (!res.ok) throw new Error(`Network error ${res.status}`);
+            const data = await res.json();
+            if (!data || !Array.isArray(data.rare_aircraft)) throw new Error('Invalid response format');
+
+            // Update summary counts based on "visits" field
+            const veryRare = data.rare_aircraft.filter(a => (a.visits ?? a.visit_count ?? 1) === 1).length;
+            const rare = data.rare_aircraft.filter(a => (a.visits ?? a.visit_count ?? 2) === 2).length;
+            const occasional = data.rare_aircraft.filter(a => {
+                const v = a.visits ?? a.visit_count ?? 0;
+                return v >= 3 && v <= 5;
+            }).length;
+            const total = data.rare_aircraft.length;
+
+            const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+            setText('rare-sum-very-rare', veryRare);
+            setText('rare-sum-rare', rare);
+            setText('rare-sum-occasional', occasional);
+            setText('rare-sum-total', total);
+
+            if (total === 0) {
+                if (emptyEl) emptyEl.style.display = 'block';
+                if (gridEl) gridEl.innerHTML = '';
+            } else {
+                if (emptyEl) emptyEl.style.display = 'none';
+                if (this.rareViewMode === 'table') {
+                    gridEl.innerHTML = `
+                    <div class="table-responsive">
+                        <table class="sky-table rare-list-table">
+                            <thead>
+                                <tr>
+                                    <th>Rarity</th>
+                                    <th>Callsign</th>
+                                    <th>ICAO Hex</th>
+                                    <th>Registration</th>
+                                    <th>Aircraft</th>
+                                    <th>Operator</th>
+                                    <th>Country</th>
+                                    <th>First Seen</th>
+                                    <th>Last Seen</th>
+                                    <th style="text-align:center">Visits</th>
+                                    <th style="text-align:center">Obs.</th>
+                                    <th style="text-align:center">Duration</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${data.rare_aircraft.map(ac => this.generateRareRowHtml(ac)).join('')}
+                            </tbody>
+                        </table>
+                    </div>`;
+                } else {
+                    gridEl.innerHTML = `
+                    <div class="rare-aircraft-grid">
+                        ${data.rare_aircraft.map(ac => this.generateRareCardHtml(ac)).join('')}
+                    </div>`;
+                }
+            }
+        } catch (e) {
+            console.error('Error loading rare aircraft:', e);
+            if (errorEl) errorEl.style.display = 'block';
+        } finally {
+            if (loadingEl) loadingEl.style.display = 'none';
+        }
+    }
+
+    generateRareCardHtml(ac) {
+        const hex      = ac.icao_hex || '—';
+        const callsign = ac.callsign && ac.callsign !== 'None' ? ac.callsign : hex;
+        let reg        = ac.registration && ac.registration !== 'None' && ac.registration !== 'null' ? ac.registration : hex;
+        const visits   = ac.visits ?? ac.visit_count ?? ac.total_sessions ?? 1;
+        const rarity   = ac.rarity || (visits === 1 ? 'very_rare' : visits === 2 ? 'rare' : 'occasional');
+        const mfr      = ac.manufacturer && ac.manufacturer !== 'None' ? ac.manufacturer : '';
+        const model    = ac.model && ac.model !== 'None' ? ac.model : '';
+        const acType   = ac.aircraft_type && ac.aircraft_type !== 'None' ? ac.aircraft_type : '';
+        const operator = ac.operator && ac.operator !== 'None' && ac.operator !== 'null' ? ac.operator : 'Unknown Operator';
+        const opIcao   = ac.operator_icao && ac.operator_icao !== 'None' ? ac.operator_icao : '';
+        const country  = ac.country && ac.country !== 'None' && ac.country !== 'null' ? ac.country : 'Unknown';
+        const first    = ac.first_seen || ac.first_seen_ist || '—';
+        const last     = ac.last_seen || ac.last_seen_ist || '—';
+        const duration = ac.duration || '—';
+        const obs      = ac.total_observations || 0;
+
+        const rarityColors = {
+            very_rare:  { bg: 'rgba(255,200,40,0.15)',  border: '#f5c518', text: '#f5c518', label: '⭐ Very Rare' },
+            rare:       { bg: 'rgba(56,189,248,0.12)',  border: '#38bdf8', text: '#38bdf8', label: '✦ Rare' },
+            occasional: { bg: 'rgba(167,139,250,0.12)', border: '#a78bfa', text: '#a78bfa', label: '◈ Occasional' },
+        };
+        const rc = rarityColors[rarity] || rarityColors.very_rare;
+        const acDesc = [mfr, model].filter(Boolean).join(' ') || (acType ? acType : 'Unknown Type');
+
+        return `
+            <div class="rare-card-v2" onclick="window.SkyAlertApp.openAircraftProfile('${hex}')"
+                 title="Click to open Aircraft Intelligence Profile" style="border-left-color:${rc.border};">
+                <div class="rc-top-row">
+                    <div class="rc-callsign">${callsign}</div>
+                    <span class="rc-badge" style="background:${rc.bg};color:${rc.text};border-color:${rc.border};">
+                        ${rc.label}
+                    </span>
+                </div>
+
+                <div class="rc-identifiers">
+                    <span class="rc-icao">${hex}</span>
+                    ${reg && reg !== '—' ? `<span class="rc-reg">${reg}</span>` : ''}
+                    ${opIcao ? `<span class="rc-opicao">${opIcao}</span>` : ''}
+                </div>
+
+                <div class="rc-divider"></div>
+
+                <div class="rc-details">
+                    <div class="rc-detail-row">
+                        <span class="rc-detail-label">Aircraft</span>
+                        <span class="rc-detail-val">${acDesc}${acType && acDesc !== acType ? ` <em>(${acType})</em>` : ''}</span>
+                    </div>
+                    <div class="rc-detail-row">
+                        <span class="rc-detail-label">Operator</span>
+                        <span class="rc-detail-val">${operator}</span>
+                    </div>
+                    <div class="rc-detail-row">
+                        <span class="rc-detail-label">Country</span>
+                        <span class="rc-detail-val">${country}</span>
+                    </div>
+                    <div class="rc-detail-row">
+                        <span class="rc-detail-label">First Seen</span>
+                        <span class="rc-detail-val">${first}</span>
+                    </div>
+                    <div class="rc-detail-row">
+                        <span class="rc-detail-label">Last Seen</span>
+                        <span class="rc-detail-val">${last}</span>
+                    </div>
+                    <div class="rc-detail-row">
+                        <span class="rc-detail-label">Duration</span>
+                        <span class="rc-detail-val">${duration}</span>
+                    </div>
+                </div>
+
+                <div class="rc-footer">
+                    <div class="rc-stat">
+                        <span class="rc-stat-val" style="color:${rc.text};">${visits}</span>
+                        <span class="rc-stat-lbl">visit${visits === 1 ? '' : 's'}</span>
+                    </div>
+                    <div class="rc-stat">
+                        <span class="rc-stat-val">${obs.toLocaleString()}</span>
+                        <span class="rc-stat-lbl">observations</span>
+                    </div>
+                </div>
+            </div>`;
+    }
+
+    generateRareRowHtml(ac) {
+        const hex      = ac.icao_hex || '—';
+        const callsign = ac.callsign && ac.callsign !== 'None' ? ac.callsign : hex;
+        let reg        = ac.registration && ac.registration !== 'None' && ac.registration !== 'null' ? ac.registration : hex;
+        const visits   = ac.visits ?? ac.visit_count ?? ac.total_sessions ?? 1;
+        const rarity   = ac.rarity || (visits === 1 ? 'very_rare' : visits === 2 ? 'rare' : 'occasional');
+        const mfr      = ac.manufacturer && ac.manufacturer !== 'None' ? ac.manufacturer : '';
+        const model    = ac.model && ac.model !== 'None' ? ac.model : '';
+        const acType   = ac.aircraft_type && ac.aircraft_type !== 'None' ? ac.aircraft_type : '';
+        const operator = ac.operator && ac.operator !== 'None' && ac.operator !== 'null' ? ac.operator : 'Unknown Operator';
+        const country  = ac.country && ac.country !== 'None' && ac.country !== 'null' ? ac.country : 'Unknown';
+        const first    = ac.first_seen || ac.first_seen_ist || '—';
+        const last     = ac.last_seen || ac.last_seen_ist || '—';
+        const duration = ac.duration || '—';
+        const obs      = ac.total_observations || 0;
+
+        const rarityMeta = {
+            very_rare:  { color: '#f5c518', label: '⭐ Very Rare' },
+            rare:       { color: '#38bdf8', label: '✦ Rare' },
+            occasional: { color: '#a78bfa', label: '◈ Occasional' },
+        };
+        const rm = rarityMeta[rarity] || rarityMeta.very_rare;
+        const acDesc = [mfr, model].filter(Boolean).join(' ') || (acType ? acType : 'Unknown Type');
+        const acDescFull = acType && acDesc !== acType ? `${acDesc} <span style="color:var(--text-muted);font-size:11px">(${acType})</span>` : acDesc;
+
+        return `
+            <tr class="rare-list-row" onclick="window.SkyAlertApp.openAircraftProfile('${hex}')"
+                title="Click to open Aircraft Intelligence Profile">
+                <td>
+                    <span class="rare-rarity-badge" style="color:${rm.color};">${rm.label}</span>
+                </td>
+                <td class="mono" style="font-weight:700; color:var(--radar-cyan);">${callsign}</td>
+                <td class="mono" style="color:var(--text-muted); font-size:12px;">${hex}</td>
+                <td class="mono">${reg}</td>
+                <td style="font-size:12px;">${acDescFull}</td>
+                <td style="font-size:12px; color:var(--text-secondary);">${operator}</td>
+                <td style="font-size:12px; color:var(--text-secondary);">${country}</td>
+                <td style="font-size:11px; color:var(--text-muted);">${first}</td>
+                <td style="font-size:11px; color:var(--text-muted);">${last}</td>
+                <td style="text-align:center; font-family:var(--font-mono); font-weight:700; color:${rm.color};">${visits}</td>
+                <td style="text-align:center; font-family:var(--font-mono); font-size:12px;">${obs.toLocaleString()}</td>
+                <td style="text-align:center; font-size:12px; color:var(--text-muted);">${duration}</td>
+            </tr>`;
+    }
+
+    async loadAircraftReplay(hex) {
+        try {
+            const res = await fetch(`/api/aircraft/${hex}/replay`);
+            const data = await res.json();
+            if (data.trajectory && data.trajectory.length > 0) {
+                let msg = `✈ Trajectory Flight Replay Loaded for ${hex}:\nTotal Replay Points: ${data.trajectory.length}\n`;
+                data.trajectory.slice(0, 5).forEach(pt => {
+                    msg += `\nStep ${pt.step} (${pt.time_ist}): Lat ${pt.latitude}, Lon ${pt.longitude}, Alt ${pt.altitude_ft}ft, Speed ${pt.speed_kmh}km/h`;
+                });
+                alert(msg);
+            } else {
+                alert(`No trajectory replay points found for ${hex}.`);
+            }
+        } catch (e) {
+            console.error("Replay error:", e);
+        }
+    }
+
+}
+
+// Instantiate on DOM load
+document.addEventListener("DOMContentLoaded", () => {
+    window.SkyAlertApp = new SkyAlertApp();
+    window.SkyAlertApp.init();
+});

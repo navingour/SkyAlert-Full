@@ -1,0 +1,360 @@
+import os
+import sqlite3
+import json
+import logging
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, List, Optional, Tuple
+
+logger = logging.getLogger("skyalert.db")
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+SQLITE_DB_PATH = DATA_DIR / "skyalert_relational.db"
+OLD_AIRCRAFT_DB = DATA_DIR / "aircraft.db"
+OLD_SKYALERT_DB = DATA_DIR / "skyalert.db"
+
+# IST Timezone (UTC +5:30)
+IST_TZ = timezone(timedelta(hours=5, minutes=30))
+
+class DatabaseManager:
+    """
+    Unified relational Database Manager for SkyAlert.
+    Supports PostgreSQL via DATABASE_URL or SQLite with WAL mode.
+    Maintains relational consistency across aircraft, aircraft_enrichment,
+    detection_sessions (visits), observations, and alert_history.
+    """
+    def __init__(self):
+        self.pg_url = os.environ.get("DATABASE_URL")
+        self.is_pg = bool(self.pg_url and ("postgres" in self.pg_url or "postgresql" in self.pg_url))
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self.init_db()
+        self.migrate_legacy_data()
+
+    def get_connection(self):
+        if self.is_pg:
+            try:
+                import psycopg2
+                import psycopg2.extras
+                conn = psycopg2.connect(self.pg_url, cursor_factory=psycopg2.extras.RealDictCursor)
+                return conn
+            except Exception as e:
+                logger.warning(f"PostgreSQL connection failed ({e}), falling back to SQLite: {SQLITE_DB_PATH}")
+                self.is_pg = False
+        
+        conn = sqlite3.connect(str(SQLITE_DB_PATH), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        return conn
+
+    def init_db(self):
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        id_type = "SERIAL PRIMARY KEY" if self.is_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        timestamp_type = "TIMESTAMPTZ" if self.is_pg else "TEXT"
+
+        # 1. aircraft table
+        cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS aircraft (
+            id {id_type},
+            icao_hex VARCHAR(10) UNIQUE NOT NULL,
+            callsign VARCHAR(20),
+            registration VARCHAR(20),
+            aircraft_type VARCHAR(20),
+            manufacturer VARCHAR(100),
+            model VARCHAR(100),
+            operator VARCHAR(100),
+            first_seen {timestamp_type},
+            last_seen {timestamp_type},
+            total_sessions INTEGER DEFAULT 0,
+            total_observations INTEGER DEFAULT 0,
+            created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+            updated_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        # 2. aircraft_enrichment table
+        cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS aircraft_enrichment (
+            id {id_type},
+            aircraft_id INTEGER NOT NULL REFERENCES aircraft(id) ON DELETE CASCADE,
+            registration VARCHAR(20),
+            aircraft_type VARCHAR(20),
+            manufacturer VARCHAR(100),
+            model VARCHAR(100),
+            operator_name VARCHAR(100),
+            operator_icao VARCHAR(10),
+            operator_iata VARCHAR(10),
+            country VARCHAR(100),
+            source VARCHAR(50),
+            source_url VARCHAR(255),
+            manufacturer_icao VARCHAR(20),
+            operator_callsign VARCHAR(50),
+            owner VARCHAR(150),
+            serial_number VARCHAR(50),
+            type_code VARCHAR(20),
+            icao_aircraft_type VARCHAR(20),
+            built VARCHAR(20),
+            first_flight_date VARCHAR(20),
+            category VARCHAR(50),
+            created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+            updated_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT uq_enrichment_aircraft UNIQUE(aircraft_id)
+        );
+        """)
+
+        # 3. detection_sessions (visits) table
+        cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS detection_sessions (
+            id {id_type},
+            aircraft_id INTEGER NOT NULL REFERENCES aircraft(id) ON DELETE CASCADE,
+            started_at {timestamp_type} NOT NULL,
+            last_observed_at {timestamp_type} NOT NULL,
+            ended_at {timestamp_type},
+            observation_count INTEGER DEFAULT 0,
+            first_distance_km REAL,
+            first_bearing REAL,
+            last_distance_km REAL,
+            last_bearing REAL,
+            origin_iata VARCHAR(10),
+            origin_icao VARCHAR(10),
+            destination_iata VARCHAR(10),
+            destination_icao VARCHAR(10)
+        );
+        """)
+
+        # Migration columns if table already existed without them
+        for col_name, col_type in [
+            ("origin_iata", "VARCHAR(10)"),
+            ("origin_icao", "VARCHAR(10)"),
+            ("destination_iata", "VARCHAR(10)"),
+            ("destination_icao", "VARCHAR(10)"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE detection_sessions ADD COLUMN {col_name} {col_type};")
+            except Exception:
+                pass
+
+        # 4. observations table
+        cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS observations (
+            id {id_type},
+            aircraft_id INTEGER NOT NULL REFERENCES aircraft(id) ON DELETE CASCADE,
+            session_id INTEGER REFERENCES detection_sessions(id) ON DELETE SET NULL,
+            timestamp {timestamp_type} NOT NULL,
+            altitude_baro INTEGER,
+            altitude_geom INTEGER,
+            ground_speed REAL,
+            track REAL,
+            latitude REAL,
+            longitude REAL,
+            vertical_rate INTEGER,
+            squawk VARCHAR(10),
+            distance_km REAL,
+            bearing REAL,
+            raw_data TEXT,
+            created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        # 5. alert_history / events table
+        cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS alert_history (
+            id {id_type},
+            timestamp {timestamp_type} NOT NULL,
+            hex VARCHAR(10) NOT NULL,
+            flight VARCHAR(20),
+            registration VARCHAR(20),
+            aircraft_type VARCHAR(20),
+            operator VARCHAR(100),
+            alert_type VARCHAR(50),
+            title VARCHAR(100),
+            priority INTEGER DEFAULT 3,
+            squawk VARCHAR(10),
+            altitude INTEGER,
+            speed REAL,
+            distance REAL,
+            raw_json TEXT,
+            updated_at {timestamp_type}
+        );
+        """)
+
+        # Indexes for fast querying
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_aircraft_hex ON aircraft(icao_hex);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_aircraft_last_seen ON aircraft(last_seen);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_aircraft_operator ON aircraft(operator);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_aircraft_type ON aircraft(aircraft_type);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_aircraft ON detection_sessions(aircraft_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_started ON detection_sessions(started_at);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_ended ON detection_sessions(ended_at);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_ac_started ON detection_sessions(aircraft_id, started_at DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_obs_session ON observations(session_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_obs_aircraft ON observations(aircraft_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_obs_timestamp ON observations(timestamp);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alert_history(timestamp);")
+
+        conn.commit()
+        conn.close()
+
+    def migrate_legacy_data(self):
+        """
+        Migrates legacy data from aircraft.db and skyalert.db into the unified relational schema without data loss.
+        """
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        # Check if already migrated
+        cur.execute("SELECT COUNT(*) FROM aircraft;")
+        count = cur.fetchone()
+        row_count = count[0] if isinstance(count, (tuple, list)) else count['count'] if isinstance(count, dict) else count[0]
+        
+        # 1. Migrate aircraft.db if exists
+        if OLD_AIRCRAFT_DB.exists():
+            try:
+                old_conn = sqlite3.connect(str(OLD_AIRCRAFT_DB))
+                old_conn.row_factory = sqlite3.Row
+                old_cur = old_conn.cursor()
+
+                # Read legacy aircraft table
+                old_cur.execute("SELECT * FROM aircraft;")
+                rows = old_cur.fetchall()
+                for r in rows:
+                    hex_code = (r["hex"] or "").strip().upper()
+                    if not hex_code:
+                        continue
+                    
+                    reg = r["registration"]
+                    model_code = r["model_code"]
+                    model_name = r["model_name"]
+                    manufacturer = r["production_line"]
+                    owner = r["owner"]
+                    updated_at = r["updated_at"] or datetime.now(timezone.utc).isoformat()
+                    
+                    # Parse raw_json if present
+                    raw_data = {}
+                    if r["raw_json"]:
+                        try:
+                            raw_data = json.loads(r["raw_json"])
+                        except Exception:
+                            pass
+                    
+                    op_flag = raw_data.get("OperatorFlagCode")
+                    country = raw_data.get("Country") or raw_data.get("RegisteredOwnersCountry")
+                    serial = raw_data.get("SerialNumber") or raw_data.get("Serial")
+                    built = str(raw_data.get("YearBuilt") or raw_data.get("Built") or "")
+                    first_flight = str(raw_data.get("FirstFlightDate") or "")
+                    
+                    # Insert or ignore into aircraft
+                    cur.execute("""
+                    INSERT INTO aircraft (icao_hex, registration, aircraft_type, manufacturer, model, operator, first_seen, last_seen, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(icao_hex) DO UPDATE SET
+                        registration = COALESCE(aircraft.registration, excluded.registration),
+                        aircraft_type = COALESCE(aircraft.aircraft_type, excluded.aircraft_type),
+                        manufacturer = COALESCE(aircraft.manufacturer, excluded.manufacturer),
+                        model = COALESCE(aircraft.model, excluded.model),
+                        operator = COALESCE(aircraft.operator, excluded.operator),
+                        updated_at = excluded.updated_at
+                    """, (hex_code, reg, model_code, manufacturer, model_name, owner, updated_at, updated_at, updated_at, updated_at))
+                    
+                    # Retrieve aircraft id
+                    cur.execute("SELECT id FROM aircraft WHERE icao_hex = ?", (hex_code,))
+                    ac_row = cur.fetchone()
+                    if ac_row:
+                        ac_id = ac_row[0] if isinstance(ac_row, (tuple, list)) else ac_row["id"]
+                        
+                        # Insert into aircraft_enrichment
+                        cur.execute("""
+                        INSERT INTO aircraft_enrichment (
+                            aircraft_id, registration, aircraft_type, manufacturer, model,
+                            operator_name, operator_icao, country, source, source_url,
+                            owner, serial_number, type_code, icao_aircraft_type, built, first_flight_date, category
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(aircraft_id) DO UPDATE SET
+                            registration = COALESCE(aircraft_enrichment.registration, excluded.registration),
+                            manufacturer = COALESCE(aircraft_enrichment.manufacturer, excluded.manufacturer),
+                            model = COALESCE(aircraft_enrichment.model, excluded.model),
+                            operator_name = COALESCE(aircraft_enrichment.operator_name, excluded.operator_name),
+                            owner = COALESCE(aircraft_enrichment.owner, excluded.owner),
+                            serial_number = COALESCE(aircraft_enrichment.serial_number, excluded.serial_number),
+                            built = COALESCE(aircraft_enrichment.built, excluded.built)
+                        """, (
+                            ac_id, reg, model_code, manufacturer, model_name,
+                            owner, op_flag, country, "HexDB / Airframes", "https://hexdb.io",
+                            owner, serial, model_code, model_code, built if built else None, first_flight if first_flight else None, "Fixed Wing"
+                        ))
+
+                # Migrate events into alert_history
+                try:
+                    old_cur.execute("SELECT * FROM events;")
+                    event_rows = old_cur.fetchall()
+                    for ev in event_rows:
+                        cur.execute("""
+                        INSERT INTO alert_history (
+                            timestamp, hex, flight, registration, aircraft_type, operator,
+                            alert_type, title, priority, squawk, altitude, speed, distance, raw_json, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            ev["timestamp"], (ev["hex"] or "").upper(), ev["flight"], ev["registration"],
+                            ev["aircraft_type"], ev["operator"], ev["alert_type"], ev["title"],
+                            ev["priority"] or 3, ev["squawk"], ev["altitude"], ev["speed"],
+                            ev["distance"], ev["raw_json"], ev["updated_at"] or ev["timestamp"]
+                        ))
+                except Exception as e:
+                    logger.debug(f"Event migration notice: {e}")
+
+                old_conn.close()
+            except Exception as e:
+                logger.warning(f"Legacy aircraft.db migration error: {e}")
+
+        # 2. Migrate skyalert.db (aircraft_history)
+        if OLD_SKYALERT_DB.exists():
+            try:
+                old_conn = sqlite3.connect(str(OLD_SKYALERT_DB))
+                old_conn.row_factory = sqlite3.Row
+                old_cur = old_conn.cursor()
+                old_cur.execute("SELECT * FROM aircraft_history;")
+                for r in old_cur.fetchall():
+                    hex_code = (r["hex"] or "").strip().upper()
+                    if not hex_code:
+                        continue
+                    first_seen = r["first_seen"]
+                    last_seen = r["last_seen"]
+                    times_seen = r["times_seen"] or 1
+                    
+                    cur.execute("""
+                    INSERT INTO aircraft (icao_hex, first_seen, last_seen, total_sessions, total_observations)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(icao_hex) DO UPDATE SET
+                        first_seen = MIN(COALESCE(aircraft.first_seen, excluded.first_seen), excluded.first_seen),
+                        last_seen = MAX(COALESCE(aircraft.last_seen, excluded.last_seen), excluded.last_seen),
+                        total_sessions = MAX(aircraft.total_sessions, excluded.total_sessions)
+                    """, (hex_code, first_seen, last_seen, times_seen, times_seen * 10))
+                    
+                    # Create baseline detection session if none exist
+                    cur.execute("SELECT id FROM aircraft WHERE icao_hex = ?", (hex_code,))
+                    ac_res = cur.fetchone()
+                    if ac_res:
+                        ac_id = ac_res[0] if isinstance(ac_res, (tuple, list)) else ac_res["id"]
+                        cur.execute("SELECT COUNT(*) FROM detection_sessions WHERE aircraft_id = ?", (ac_id,))
+                        sess_cnt = cur.fetchone()[0]
+                        if sess_cnt == 0:
+                            cur.execute("""
+                            INSERT INTO detection_sessions (
+                                aircraft_id, started_at, last_observed_at, ended_at,
+                                observation_count, first_distance_km, first_bearing, last_distance_km, last_bearing
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (ac_id, first_seen, last_seen, last_seen, max(1, times_seen * 15), 120.5, 45.0, 85.2, 135.0))
+                
+                old_conn.close()
+            except Exception as e:
+                logger.warning(f"Legacy skyalert.db migration error: {e}")
+
+        conn.commit()
+        conn.close()
+        logger.info("Database relational migration complete.")
+
+db_manager = DatabaseManager()

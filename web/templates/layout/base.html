@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkyAlert · Aviation Monitoring & ADS-B Intelligence</title>
+
+    <!-- Google Fonts: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Leaflet.js Dark Map -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Chart.js for High Performance Canvas Visualizations -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <!-- SkyAlert Design System CSS -->
+    <link rel="stylesheet" href="/static/css/skyalert.css">
+</head>
+<body>
+
+<div class="sky-app">
+
+    <!-- =========================================================
+         SIDEBAR NAVIGATION
+         ========================================================= -->
+    <aside class="sky-sidebar">
+        <!-- Brand -->
+        <div class="sky-brand">
+            <div class="sky-brand-logo">✈</div>
+            <div class="sky-brand-title">
+                SkyAlert
+                <span class="sky-brand-subtitle">Station Control</span>
+            </div>
+        </div>
+
+        <!-- Navigation Links -->
+        <nav class="sky-nav">
+            <div class="sky-nav-category">Operations</div>
+            
+            <a class="sky-nav-link active" data-nav-target="dashboard">
+                <span class="icon">📊</span>
+                <span>Dashboard</span>
+            </a>
+
+            <a class="sky-nav-link" data-nav-target="live">
+                <span class="icon">📡</span>
+                <span>Live Airspace</span>
+                <span class="badge-count" id="nav-live-count">LIVE</span>
+            </a>
+
+            <a class="sky-nav-link" data-nav-target="map">
+                <span class="icon">🗺️</span>
+                <span>Radar Map</span>
+            </a>
+
+            <div class="sky-nav-category">Intelligence & Fleet</div>
+
+            <a class="sky-nav-link" data-nav-target="aircraft">
+                <span class="icon">✈️</span>
+                <span>Aircraft Database</span>
+            </a>
+
+            <a class="sky-nav-link" data-nav-target="sessions">
+                <span class="icon">🕒</span>
+                <span>Visits / Sessions</span>
+            </a>
+
+            <a class="sky-nav-link" data-nav-target="operators">
+                <span class="icon">🏢</span>
+                <span>Operators</span>
+            </a>
+
+            <a class="sky-nav-link" data-nav-target="types">
+                <span class="icon">🏷️</span>
+                <span>Aircraft Types</span>
+            </a>
+
+            <a class="sky-nav-link" data-nav-target="rare">
+                <span class="icon">⭐</span>
+                <span>Rare Aircraft</span>
+            </a>
+
+            <div class="sky-nav-category">Analytics & System</div>
+
+            <a class="sky-nav-link" data-nav-target="analytics">
+                <span class="icon">📈</span>
+                <span>Global Analytics</span>
+            </a>
+            <a class="sky-nav-link" data-nav-target="weather">
+                <span class="icon">🌡️</span>
+                <span>Weather Analytics</span>
+            </a>
+            <a class="sky-nav-link" data-nav-target="receiver">
+                <span class="icon">📡</span>
+                <span>Receiver Analytics</span>
+            </a>
+            <a class="sky-nav-link" data-nav-target="fleet">
+                <span class="icon">🚀</span>
+                <span>Fleet Analytics</span>
+            </a>
+            <a class="sky-nav-link" data-nav-target="formation">
+                <span class="icon">🛫</span>
+                <span>Formation Detection</span>
+            </a>
+
+            <a class="sky-nav-link" data-nav-target="unknown">
+                <span class="icon">❓</span>
+                <span>Unknown Aircraft</span>
+            </a>
+
+            <a class="sky-nav-link" data-nav-target="settings">
+                <span class="icon">⚙️</span>
+                <span>Station Settings</span>
+            </a>
+        </nav>
+
+        <!-- Sidebar Footer -->
+        <div class="sky-sidebar-footer">
+            <div class="station-status-pill">
+                <span class="status-dot"></span>
+                <span>ADS-B Receiver Active</span>
+            </div>
+            <div style="font-size: 11px; color: var(--text-dim); font-family: var(--font-mono);">
+                India Station · 1090 MHz
+            </div>
+        </div>
+    </aside>
+
+    <!-- =========================================================
+         MAIN CONTENT WRAPPER
+         ========================================================= -->
+    <div class="sky-main-wrapper">
+
+        <!-- Topbar -->
+        <header class="sky-topbar">
+            <div class="sky-topbar-left">
+                <div class="view-title-wrap">
+                    <h1 class="view-main-title" id="view-title-text">Dashboard</h1>
+                    <span class="view-main-subtitle" id="view-subtitle-text">Station Operations & ADS-B Analytics</span>
+                </div>
+            </div>
+
+            <div class="sky-search-box">
+                <span class="sky-search-icon">🔍</span>
+                <input type="text" class="sky-search-input" id="global-search-input" placeholder="Search ICAO, Reg, Flight, Operator..." readonly>
+                <span class="sky-search-shortcut">⌘K</span>
+            </div>
+
+            <div class="sky-topbar-right">
+                <div class="quick-stats-bar">
+                    <div class="quick-stat-item">
+                        <span style="color: var(--text-muted);">Live:</span>
+                        <span class="quick-stat-val live" id="quick-live-count">0</span>
+                    </div>
+                    <div class="quick-stat-item">
+                        <span style="color: var(--text-muted);">Today:</span>
+                        <span class="quick-stat-val" id="quick-today-count">0</span>
+                    </div>
+                </div>
+
+                <div class="station-clock">
+                    <span class="station-clock-time" id="station-ist-clock">Loading IST...</span>
+                    <span class="station-clock-label">Local Station Time</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Content Viewport -->
+        <main class="sky-content-viewport">
+
+            <!-- 1. DASHBOARD VIEW -->
+            <section class="view-section active-view" id="view-dashboard">
+                <!-- Dashboard Timeframe Filter Bar -->
+                <div class="sky-panel" style="margin-bottom: 20px;">
+                    <div class="sky-panel-header" style="flex-wrap: wrap; gap: 16px; justify-content: space-between; align-items: center;">
+                        <div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="font-size: 18px;">📊</span>
+                                <span class="sky-panel-title" style="font-size: 16px;">STATION METRICS & ANALYTICS</span>
+                            </div>
+                            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                                Operational KPIs and detection volume overview
+                            </div>
+                        </div>
+
+                        <!-- Timeframe Filter Buttons: Today | Week | Month | Lifetime -->
+                        <div class="rare-filter-bar">
+                            <div class="rare-btn-group">
+                                <button class="sky-btn dashboard-time-btn active" data-timeframe="today" onclick="window.SkyAlertApp.setDashboardTimeframe('today')">Today</button>
+                                <button class="sky-btn dashboard-time-btn" data-timeframe="week" onclick="window.SkyAlertApp.setDashboardTimeframe('week')">This Week</button>
+                                <button class="sky-btn dashboard-time-btn" data-timeframe="month" onclick="window.SkyAlertApp.setDashboardTimeframe('month')">This Month</button>
+                                <button class="sky-btn dashboard-time-btn" data-timeframe="lifetime" onclick="window.SkyAlertApp.setDashboardTimeframe('lifetime')">Lifetime</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Top-Level KPI Cards Grid -->
+                <div class="kpi-grid">
+                    <div class="kpi-card accent-cyan">
+                        <span class="kpi-title" id="kpi-title-seen">Aircraft Seen Today <span class="kpi-icon">✈</span></span>
+                        <span class="kpi-value" id="kpi-seen-today">-</span>
+                        <span class="kpi-subtext" id="kpi-subtext-seen">Unique airframes detected today</span>
+                    </div>
+
+                    <div class="kpi-card accent-green">
+                        <span class="kpi-title" id="kpi-title-visits">Visits Today <span class="kpi-icon">🔄</span></span>
+                        <span class="kpi-value" id="kpi-visits-today">-</span>
+                        <span class="kpi-subtext" id="kpi-subtext-visits">Total continuous detection passes</span>
+                    </div>
+
+                    <div class="kpi-card accent-green">
+                        <span class="kpi-title">Active Aircraft <span class="kpi-icon">📡</span></span>
+                        <span class="kpi-value" id="kpi-active-aircraft" style="color: var(--radar-green);">-</span>
+                        <span class="kpi-subtext">Currently within station range</span>
+                    </div>
+
+                    <div class="kpi-card accent-purple">
+                        <span class="kpi-title">Total Aircraft <span class="kpi-icon">🗄</span></span>
+                        <span class="kpi-value" id="kpi-total-aircraft">-</span>
+                        <span class="kpi-subtext">All-time unique registered aircraft</span>
+                    </div>
+
+                    <div class="kpi-card accent-amber">
+                        <span class="kpi-title">Total Observations <span class="kpi-icon">🎯</span></span>
+                        <span class="kpi-value" id="kpi-total-obs">-</span>
+                        <span class="kpi-subtext">ADS-B positional data points</span>
+                    </div>
+
+                    <div class="kpi-card accent-blue">
+                        <span class="kpi-title" id="kpi-title-det-time">Detection Time Today <span class="kpi-icon">⏱</span></span>
+                        <span class="kpi-value" id="kpi-det-time-today">-</span>
+                        <span class="kpi-subtext" id="kpi-subtext-det-time">Cumulative flight duration</span>
+                    </div>
+                </div>
+
+                <!-- Secondary Operational KPIs -->
+                <div class="kpi-grid">
+                    <div class="kpi-card">
+                        <span class="kpi-title">Enriched Aircraft</span>
+                        <span class="kpi-value" id="kpi-known-aircraft">-</span>
+                        <span class="kpi-subtext">Metadata verified in database</span>
+                    </div>
+                    <div class="kpi-card">
+                        <span class="kpi-title">Unknown Aircraft</span>
+                        <span class="kpi-value" id="kpi-unknown-aircraft">-</span>
+                        <span class="kpi-subtext">Pending enrichment resolution</span>
+                    </div>
+                    <div class="kpi-card">
+                        <span class="kpi-title">Unique Operators Today</span>
+                        <span class="kpi-value" id="kpi-unique-ops">-</span>
+                        <span class="kpi-subtext">Active airlines & military</span>
+                    </div>
+                    <div class="kpi-card">
+                        <span class="kpi-title">Longest Visit Today</span>
+                        <span class="kpi-value" id="kpi-longest-session">-</span>
+                        <span class="kpi-subtext">Maximum single session pass</span>
+                    </div>
+                    <div class="kpi-card">
+                        <span class="kpi-title">Average Visit Duration</span>
+                        <span class="kpi-value" id="kpi-avg-duration">-</span>
+                        <span class="kpi-subtext">Per detection pass</span>
+                    </div>
+                </div>
+
+                <!-- 24-Hour Station Traffic Timeline Chart -->
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">📈 24-Hour Station Traffic Timeline (IST)</span>
+                        <div class="sky-panel-actions">
+                            <span style="font-size: 11px; color: var(--text-muted);">Aggregated Hourly Volume</span>
+                        </div>
+                    </div>
+                    <div class="sky-panel-body" style="height: 280px; position: relative;">
+                        <canvas id="traffic-24h-chart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Live Aircraft Preview & Recent Alerts Split -->
+                <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px;">
+                    <!-- Live Airspace Preview -->
+                    <div class="sky-panel">
+                        <div class="sky-panel-header">
+                            <span class="sky-panel-title">📡 Currently Active Aircraft</span>
+                            <button class="sky-btn" onclick="window.location.hash='live'">View All Live ↗</button>
+                        </div>
+                        <div class="sky-panel-body">
+                            <div class="live-aircraft-grid" id="dashboard-live-cards-container">
+                                <div style="text-align: center; color: var(--text-muted); padding: 30px;">Detecting ADS-B telemetry...</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Recent Alerts -->
+                    <div class="sky-panel">
+                        <div class="sky-panel-header">
+                            <span class="sky-panel-title">🚨 Recent Alerts</span>
+                        </div>
+                        <div class="sky-panel-body" id="dashboard-alerts-container">
+                            <div style="text-align: center; color: var(--text-muted); padding: 20px;">No recent alerts.</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 2. LIVE AIRSPACE VIEW -->
+            <section class="view-section" id="view-live">
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">📡 Active Airspace Radar Feed</span>
+                        <span class="live-badge live" id="live-view-count-badge">0 Aircraft</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div class="live-aircraft-grid" id="live-airspace-grid">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 3. INTERACTIVE RADAR MAP VIEW -->
+            <section class="view-section" id="view-map">
+                <div class="radar-map-container">
+                    <div id="leaflet-radar-map"></div>
+                    <div class="map-floating-overlay">
+                        <div style="font-size: 13px; font-weight: 700; color: var(--radar-cyan);">Fixed Station Coverage</div>
+                        <div style="font-size: 11px; color: var(--text-secondary);">Rings: 50 / 100 / 150 / 200 / 250 km</div>
+                        <div style="font-size: 10px; font-family: var(--font-mono); color: var(--text-muted);">Center: India Receiver</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 4. AIRCRAFT DATABASE VIEW -->
+            <section class="view-section" id="view-aircraft">
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">✈️ Aircraft Intelligence Database</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <!-- Table Controls Bar -->
+                        <div class="table-controls-bar">
+                            <div class="table-filter-group">
+                                <input type="text" class="sky-input" id="table-filter-search" placeholder="Filter ICAO, Reg, Callsign, Operator..." style="width: 280px;">
+                                <select class="sky-select" id="table-filter-enriched">
+                                    <option value="">All Statuses (Known & Unknown)</option>
+                                    <option value="known">Enriched / Known</option>
+                                    <option value="unknown">Un-enriched / Unknown</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Aircraft Table -->
+                        <div class="table-responsive">
+                            <table class="sky-table">
+                                <thead>
+                                    <tr>
+                                        <th>ICAO Hex</th>
+                                        <th>Callsign</th>
+                                        <th>Registration</th>
+                                        <th>Type</th>
+                                        <th>Manufacturer</th>
+                                        <th>Model</th>
+                                        <th>Operator</th>
+                                        <th>First Seen (IST)</th>
+                                        <th>Last Seen (IST)</th>
+                                        <th style="text-align: center;">Lifetime Visits</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="aircraft-table-body">
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Table Pagination -->
+                        <div class="table-pagination">
+                            <span id="table-page-info">Page 1 of 1</span>
+                            <div class="pagination-btn-group">
+                                <button class="sky-btn" id="table-prev-btn" onclick="window.SkyAlertApp.tablePrevPage()">Previous</button>
+                                <button class="sky-btn" id="table-next-btn" onclick="window.SkyAlertApp.tableNextPage()">Next</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 5. AIRCRAFT PROFILE DETAIL VIEW -->
+            <section class="view-section" id="view-aircraft-profile">
+                <!-- Dynamically populated by renderAircraftProfilePage -->
+            </section>
+
+            <!-- 6. DETECTION SESSIONS / VISITS VIEW -->
+            <section class="view-section" id="view-sessions">
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">🕒 Station Visit History & Detection Sessions</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div class="table-responsive">
+                            <table class="sky-table">
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Time Interval (IST)</th>
+                                        <th>Duration</th>
+                                        <th>Observations</th>
+                                        <th>Distance Range</th>
+                                        <th>Bearing Range</th>
+                                        <th>Status</th>
+                                        <th>Details</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="global-sessions-table-body">
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 7. GLOBAL ANALYTICS VIEW -->
+            <section class="view-section" id="view-analytics">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <!-- Top Operators Table -->
+                    <div class="sky-panel">
+                        <div class="sky-panel-header">
+                            <span class="sky-panel-title">🏢 Top Operators by Volume</span>
+                        </div>
+                        <div class="sky-panel-body">
+                            <div class="table-responsive">
+                                <table class="sky-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Operator</th>
+                                            <th>ICAO</th>
+                                            <th>Country</th>
+                                            <th>Unique Planes</th>
+                                            <th>Unique Flights</th>
+                                            <th>Total Visits</th>
+                                            <th>Avg Duration</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="analytics-top-operators-table">
+                                        <!-- Dynamic -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Top Aircraft Types Table -->
+                    <div class="sky-panel">
+                        <div class="sky-panel-header">
+                            <span class="sky-panel-title">🏷️ Top Aircraft Types</span>
+                        </div>
+                        <div class="sky-panel-body">
+                            <div class="table-responsive">
+                                <table class="sky-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Type Code</th>
+                                            <th>Model</th>
+                                            <th>Manufacturer</th>
+                                            <th>Unique Planes</th>
+                                            <th>Unique Flights</th>
+                                            <th>Total Visits</th>
+                                            <th>Avg Duration</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="analytics-top-types-table">
+                                        <!-- Dynamic -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            <!-- Weather Analytics View -->
+            <section class="view-section" id="view-weather">
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">🌡️ Weather Analytics</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <p>Upper‑air thermal profiles (OAT/TAT) and wind shear vectors will be displayed here.</p>
+                    </div>
+                </div>
+            </section>
+            <!-- Receiver Analytics View -->
+            <section class="view-section" id="view-receiver">
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">📡 Receiver Analytics</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <p>Signal horizon map and ADS‑B quality metrics will be displayed here.</p>
+                    </div>
+                </div>
+            </section>
+            <!-- Fleet Analytics View -->
+            <section class="view-section" id="view-fleet">
+                <div class="sky-panel" style="margin-bottom: 20px;">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">🚀 Fleet Analytics & Operator Turnaround</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;" id="fleet-grid-container">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+            <!-- Formation Detection View -->
+            <section class="view-section" id="view-formation">
+                <!-- Summary KPI row -->
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 20px;">
+                    <div class="kpi-card" style="border-left: 3px solid var(--radar-red);">
+                        <span class="kpi-label">🚨 Anomalies</span>
+                        <span class="kpi-value" id="formation-sum-anomalies" style="color: var(--radar-red);">0</span>
+                        <span class="kpi-delta">Emergency & Telemetry</span>
+                    </div>
+                    <div class="kpi-card" style="border-left: 3px solid var(--radar-cyan);">
+                        <span class="kpi-label">🛫 Formations</span>
+                        <span class="kpi-value" id="formation-sum-formations" style="color: var(--radar-cyan);">0</span>
+                        <span class="kpi-delta">Escort / Proximity</span>
+                    </div>
+                    <div class="kpi-card" style="border-left: 3px solid var(--radar-amber);">
+                        <span class="kpi-label">✨ First / Rare</span>
+                        <span class="kpi-value" id="formation-sum-rare" style="color: var(--radar-amber);">0</span>
+                        <span class="kpi-delta">New to Receiver</span>
+                    </div>
+                    <div class="kpi-card" style="border-left: 3px solid var(--radar-green);">
+                        <span class="kpi-label">📡 Tracked</span>
+                        <span class="kpi-value" id="formation-sum-total" style="color: var(--radar-green);">0</span>
+                        <span class="kpi-delta" id="formation-station-time">Live Feed</span>
+                    </div>
+                </div>
+
+                <!-- Anomalies & Emergencies -->
+                <div class="sky-panel" style="margin-bottom: 20px;">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">🚨 Live Anomalies &amp; Emergency Alerts</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div id="formation-anomalies-container" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px;">
+                            <div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--text-muted);">Scanning live feed for anomalies...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Formations & Escort Pairs -->
+                <div class="sky-panel" style="margin-bottom: 20px;">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">🛫 Formation &amp; Escort Detection</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div id="formation-pairs-container" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px;">
+                            <div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--text-muted);">Analyzing proximity of tracked aircraft...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- First Sightings / Rare & Special -->
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">✨ First Sightings · Rare &amp; Special Aircraft</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div id="formation-rare-container" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px;">
+                            <div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--text-muted);">Identifying new and special aircraft...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            <!-- Operator Intelligence View -->
+            <section class="view-section" id="view-operators">
+                <div class="sky-panel" style="margin-bottom: 20px;">
+                    <div class="sky-panel-header" style="flex-wrap: wrap; gap: 16px; justify-content: space-between; align-items: center;">
+                        <div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="font-size: 18px;">🏢</span>
+                                <span class="sky-panel-title" style="font-size: 16px;">OPERATOR INTELLIGENCE</span>
+                            </div>
+                            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                                Commercial airlines, military air forces, government & cargo fleet analytics
+                            </div>
+                        </div>
+
+                        <!-- Timeframe Filter Buttons: Today | Week | Month | Lifetime -->
+                        <div class="rare-filter-bar">
+                            <div class="rare-btn-group">
+                                <button class="sky-btn operator-time-btn" data-timeframe="today" onclick="window.SkyAlertApp.setOperatorTimeframe('today')">Today</button>
+                                <button class="sky-btn operator-time-btn" data-timeframe="week" onclick="window.SkyAlertApp.setOperatorTimeframe('week')">This Week</button>
+                                <button class="sky-btn operator-time-btn" data-timeframe="month" onclick="window.SkyAlertApp.setOperatorTimeframe('month')">This Month</button>
+                                <button class="sky-btn operator-time-btn active" data-timeframe="lifetime" onclick="window.SkyAlertApp.setOperatorTimeframe('lifetime')">Lifetime</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;" id="operators-grid-container">
+                    <!-- Populated dynamically -->
+                </div>
+            </section>
+
+            <!-- 9. AIRCRAFT TYPES VIEW -->
+            <section class="view-section" id="view-types">
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;" id="types-grid-container">
+                    <!-- Populated dynamically -->
+                </div>
+            </section>
+
+            <!-- 10. UNKNOWN AIRCRAFT VIEW -->
+            <section class="view-section" id="view-unknown">
+                <div class="sky-panel">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">❓ Un-enriched Aircraft Resolution Queue</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <div class="table-responsive">
+                            <table class="sky-table">
+                                <thead>
+                                    <tr>
+                                        <th>ICAO Hex</th>
+                                        <th>Callsign</th>
+                                        <th>First Seen (IST)</th>
+                                        <th>Last Seen (IST)</th>
+                                        <th>Visits</th>
+                                        <th>Observations</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="unknown-table-body">
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 11. RARE AIRCRAFT VIEW -->
+            <section class="view-section" id="view-rare">
+                <div class="sky-panel" style="margin-bottom: 20px;">
+                    <div class="sky-panel-header" style="flex-wrap: wrap; gap: 16px; justify-content: space-between;">
+                        <div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="font-size: 18px;">⭐</span>
+                                <span class="sky-panel-title" style="font-size: 16px;">RARE AIRCRAFT</span>
+                            </div>
+                            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                                Aircraft rarely detected by this receiver
+                            </div>
+                        </div>
+
+                        <!-- Filter Buttons [ 1 visit ] [ 2 visits ] [ 5 visits ] & Layout Switcher -->
+                        <div class="rare-filter-bar" style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span class="rare-filter-label">Filter:</span>
+                                <div class="rare-btn-group">
+                                    <button class="sky-btn rare-filter-btn" data-visits="1" onclick="window.SkyAlertApp.setRareVisitsFilter(1)">1 visit</button>
+                                    <button class="sky-btn rare-filter-btn" data-visits="2" onclick="window.SkyAlertApp.setRareVisitsFilter(2)">2 visits</button>
+                                    <button class="sky-btn rare-filter-btn active" data-visits="5" onclick="window.SkyAlertApp.setRareVisitsFilter(5)">5 visits</button>
+                                </div>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span class="rare-filter-label">Layout:</span>
+                                <div class="rare-btn-group">
+                                    <button class="sky-btn rare-layout-btn active" data-mode="cards" onclick="window.SkyAlertApp.setRareViewMode('cards')">🎛️ Small Boxes</button>
+                                    <button class="sky-btn rare-layout-btn" data-mode="table" onclick="window.SkyAlertApp.setRareViewMode('table')">📋 List Table</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="sky-panel-body">
+                        <!-- Summary Statistics Area -->
+                        <div class="rare-summary-grid">
+                            <div class="rare-summary-card accent-gold">
+                                <span class="rare-sum-title">⭐ Very Rare</span>
+                                <span class="rare-sum-val" id="rare-sum-very-rare">-</span>
+                                <span class="rare-sum-sub">1 visit recorded</span>
+                            </div>
+                            <div class="rare-summary-card accent-cyan">
+                                <span class="rare-sum-title">⭐ Rare</span>
+                                <span class="rare-sum-val" id="rare-sum-rare">-</span>
+                                <span class="rare-sum-sub">2 visits recorded</span>
+                            </div>
+                            <div class="rare-summary-card accent-purple">
+                                <span class="rare-sum-title">⭐ Occasional</span>
+                                <span class="rare-sum-val" id="rare-sum-occasional">-</span>
+                                <span class="rare-sum-sub">3–5 visits recorded</span>
+                            </div>
+                            <div class="rare-summary-card accent-green">
+                                <span class="rare-sum-title">Total Rare Aircraft</span>
+                                <span class="rare-sum-val" id="rare-sum-total">-</span>
+                                <span class="rare-sum-sub">Matching current filter</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Loading State -->
+                <div id="rare-loading-indicator" class="rare-status-message" style="display: none;">
+                    <div class="radar-scan-spinner"></div>
+                    <span>Loading rare aircraft intelligence...</span>
+                </div>
+
+                <!-- Error State -->
+                <div id="rare-error-state" class="rare-status-message" style="display: none;">
+                    <span style="color: var(--accent-red); font-size: 16px;">⚠️</span>
+                    <span>Unable to load rare aircraft data.</span>
+                </div>
+
+                <!-- Empty State -->
+                <div id="rare-empty-state" class="rare-status-message" style="display: none;">
+                    <span style="font-size: 24px;">✈️</span>
+                    <span style="font-size: 14px; font-weight: 600;">No rare aircraft detected yet.</span>
+                </div>
+
+                <!-- Rare Aircraft List Table -->
+                <div class="table-responsive" id="rare-aircraft-cards-grid">
+                    <!-- Dynamically populated -->
+                </div>
+            </section>
+
+            <!-- 12. SETTINGS VIEW -->
+            <section class="view-section" id="view-settings">
+                <div class="sky-panel" style="max-width: 700px;">
+                    <div class="sky-panel-header">
+                        <span class="sky-panel-title">⚙️ Station & Monitoring Configuration</span>
+                    </div>
+                    <div class="sky-panel-body">
+                        <form id="settings-form" style="display: flex; flex-direction: column; gap: 16px;">
+                            <div class="info-item-row">
+                                <span class="info-label">Receiver Feed URL (TAR1090)</span>
+                                <input type="text" class="sky-input" value="http://192.168.0.118/tar1090/data/aircraft.json" style="width: 320px;">
+                            </div>
+                            <div class="info-item-row">
+                                <span class="info-label">SkyAlert Backend API URL</span>
+                                <input type="text" class="sky-input" value="http://192.168.0.118/skyalert/api" style="width: 320px;">
+                            </div>
+                            <div class="info-item-row">
+                                <span class="info-label">Station Latitude</span>
+                                <input type="text" class="sky-input" value="22.5726" style="width: 140px;">
+                            </div>
+                            <div class="info-item-row">
+                                <span class="info-label">Station Longitude</span>
+                                <input type="text" class="sky-input" value="88.3639" style="width: 140px;">
+                            </div>
+                            <div class="info-item-row">
+                                <span class="info-label">Session Inactivity Timeout</span>
+                                <input type="text" class="sky-input" value="10 minutes" style="width: 140px;">
+                            </div>
+                            <div class="info-item-row">
+                                <span class="info-label">Timezone Display</span>
+                                <span class="info-value">IST (Indian Standard Time · UTC+5:30)</span>
+                            </div>
+                            <div style="margin-top: 10px;">
+                                <button type="button" class="sky-btn primary" onclick="alert('Station parameters saved successfully.')">
+                                    Save Configuration
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- =========================================================
+         GLOBAL SEARCH MODAL
+         ========================================================= -->
+    <div class="sky-modal-backdrop" id="global-search-modal">
+        <div class="sky-modal-window search-modal-box">
+            <div class="sky-modal-header">
+                <span class="sky-panel-title">🔍 Quick Aircraft Search</span>
+                <button class="sky-btn" onclick="window.SkyAlertApp.closeAllModals()">ESC</button>
+            </div>
+            <div class="sky-modal-body">
+                <input type="text" class="sky-input" id="modal-search-field" placeholder="Search ICAO, Reg, Callsign, Operator, Model, Country..." style="width: 100%; font-size: 14px; padding: 10px 14px;">
+                <div class="search-results-list" id="modal-search-results-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- =========================================================
+         SESSION DETAIL INSPECT MODAL
+         ========================================================= -->
+    <div class="sky-modal-backdrop" id="session-detail-modal">
+        <div class="sky-modal-window">
+            <div class="sky-modal-header">
+                <span class="sky-panel-title">🕒 Detection Session Telemetry Detail</span>
+                <button class="sky-btn" onclick="window.SkyAlertApp.closeAllModals()">✕ Close</button>
+            </div>
+            <div class="sky-modal-body" id="session-modal-content">
+                <!-- Dynamic -->
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- Scripts -->
+<script src="/static/js/radar_map.js"></script>
+<script src="/static/js/skyalert_app.js"></script>
+
+</body>
+</html>

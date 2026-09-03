@@ -1,0 +1,17 @@
+[Unit]
+Description=SkyAlert Standalone Backend (collector + API)
+After=network.target
+
+[Service]
+Type=simple
+User=skyalert
+WorkingDirectory=/opt/skyalert-backend
+Environment=PYTHONUNBUFFERED=1
+# To use PostgreSQL instead of SQLite, set DATABASE_URL here or in /etc/skyalert-backend.env
+# EnvironmentFile=-/etc/skyalert-backend.env
+ExecStart=/opt/skyalert-backend/venv/bin/uvicorn app.api:app --host 0.0.0.0 --port 8091
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

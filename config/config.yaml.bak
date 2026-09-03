@@ -1,0 +1,39 @@
+general:
+  poll_interval: 20
+tar1090:
+  url: http://localhost/tar1090/data/aircraft.json
+telegram:
+  enabled: true
+  bot_token: 8914548311:AAHjUvcssYq-WIRXMs5pfF-XhZcivik7PWo
+  chat_id: '1674953261'
+alerts:
+  emergency: false
+  military: false
+  government: false
+  police: false
+  rare_aircraft: false
+  watchlist: false
+rare_aircraft:
+  aircraft_types:
+  - A388
+  - A124
+  - A225
+  - B748
+  - B744
+  - BLCF
+  - A3ST
+  - C17
+  - C5M
+  - C130
+  - E3TF
+  - P8
+watchlist:
+  registrations: []
+  operators:
+  - Indian Air Force
+  - NASA
+  - Qatar Executive
+  flights:
+  - RCH
+  - IAF
+  hex: []

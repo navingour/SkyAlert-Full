@@ -1,0 +1,360 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+<div class="container-fluid">
+
+    <!-- ================================================= -->
+    <!-- STATUS CARDS -->
+    <!-- ================================================= -->
+
+    <div class="row g-3 mb-4">
+
+        <!-- Aircraft Seen -->
+        <div class="col-lg-4">
+
+            <div class="card shadow-sm border-0 h-100">
+
+                <div class="card-body">
+
+                    <h6 class="text-muted">
+                        Aircraft Seen
+                    </h6>
+
+                    <h1>
+                        {{ status.aircraft_seen }}
+                    </h1>
+
+                    <p class="text-muted mb-0">
+                        Total aircraft events recorded
+                    </p>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- Aircraft Database -->
+        <div class="col-lg-4">
+
+            <div class="card shadow-sm border-0 h-100">
+
+                <div class="card-body">
+
+                    <h6 class="text-muted">
+                        ICAO Database
+                    </h6>
+
+                    <h1>
+                        {{ "{:,}".format(status.aircraft_db) }}
+                    </h1>
+
+                    <p class="text-muted mb-0">
+                        Known aircraft
+                    </p>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- Engine -->
+        <div class="col-lg-4">
+
+            <div class="card shadow-sm border-0 h-100">
+
+                <div class="card-body">
+
+                    <h6 class="text-muted">
+                        SkyAlert Engine
+                    </h6>
+
+                    {% if status.engine %}
+
+                    <h2 class="text-success">
+                        🟢 Running
+                    </h2>
+
+                    {% else %}
+
+                    <h2 class="text-danger">
+                        🔴 Stopped
+                    </h2>
+
+                    {% endif %}
+
+                    <p class="text-muted mb-0">
+                        systemd service
+                    </p>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- Telegram -->
+        <div class="col-lg-4">
+
+            <div class="card shadow-sm border-0 h-100">
+
+                <div class="card-body">
+
+                    <h6 class="text-muted">
+                        Telegram
+                    </h6>
+
+                    {% if config.telegram.enabled %}
+
+                    <h3 class="text-success">
+                        🟢 Enabled
+                    </h3>
+
+                    {% else %}
+
+                    <h3 class="text-danger">
+                        🔴 Disabled
+                    </h3>
+
+                    {% endif %}
+
+                    <p class="text-muted mb-0">
+                        Notifications
+                    </p>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- Receiver -->
+        <div class="col-lg-4">
+
+            <div class="card shadow-sm border-0 h-100">
+
+                <div class="card-body">
+
+                    <h6 class="text-muted">
+                        Receiver
+                    </h6>
+
+                    {% if status.receiver %}
+
+                    <h3 class="text-success">
+                        🟢 Online
+                    </h3>
+
+                    {% else %}
+
+                    <h3 class="text-danger">
+                        🔴 Offline
+                    </h3>
+
+                    {% endif %}
+
+                    <p class="text-muted mb-0">
+                        tar1090
+                    </p>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- Heartbeat -->
+        <div class="col-lg-4">
+
+            <div class="card shadow-sm border-0 h-100">
+
+                <div class="card-body">
+
+                    <h6 class="text-muted">
+                        Heartbeat
+                    </h6>
+
+                    <h3>
+                        💚 Active
+                    </h3>
+
+                    <p class="text-muted mb-0">
+                        Hourly monitoring
+                    </p>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- ================================================= -->
+    <!-- RECENT AIRCRAFT EVENTS -->
+    <!-- ================================================= -->
+
+    <div class="card shadow-sm border-0">
+
+        <div class="card-header bg-white">
+
+            <div class="d-flex justify-content-between align-items-center">
+
+                <div>
+
+                    <h5 class="mb-0">
+                        Recent Aircraft Events
+                    </h5>
+
+                    <small class="text-muted">
+                        Latest events recorded by SkyAlert
+                    </small>
+
+                </div>
+
+                <a
+                    href="/aircraft"
+                    class="btn btn-sm btn-outline-primary"
+                >
+                    📡 Live Aircraft
+                </a>
+
+            </div>
+
+        </div>
+
+
+        <div class="table-responsive">
+
+            <table class="table table-hover align-middle mb-0">
+
+                <thead class="table-dark">
+
+                    <tr>
+
+                        <th>Time</th>
+
+                        <th>Flight</th>
+
+                        <th>Registration</th>
+
+                        <th>Aircraft</th>
+
+                        <th>Operator</th>
+
+                        <th>ICAO</th>
+
+                    </tr>
+
+                </thead>
+
+
+                <tbody>
+
+                    {% if status.recent_alerts %}
+
+                        {% for alert in status.recent_alerts %}
+
+                        <tr>
+
+                            <td class="text-nowrap">
+
+                                <small>
+                                    {{ format_timestamp(alert["updated_at"] or alert["timestamp"]) }}
+                                </small>
+
+                            </td>
+
+
+                            <td>
+
+                                <strong>
+                                    {{ alert["flight"] or "-" }}
+                                </strong>
+
+                            </td>
+
+
+                            <td>
+
+                                {{ alert["registration"] or "Loading..." }}
+
+                            </td>
+
+
+                            <td>
+
+                                {% if alert["aircraft_type"] %}
+
+                                <span class="badge bg-primary">
+
+                                    {{ alert["aircraft_type"] }}
+
+                                </span>
+
+                                {% else %}
+
+                                <span class="text-muted">
+                                    Unknown
+                                </span>
+
+                                {% endif %}
+
+                            </td>
+
+
+                            <td>
+
+                                {{ alert["operator"] or "-" }}
+
+                            </td>
+
+
+                            <td>
+
+                                <code>
+                                    {{ alert["hex"] or "-" }}
+                                </code>
+
+                            </td>
+
+                        </tr>
+
+                        {% endfor %}
+
+                    {% else %}
+
+                        <tr>
+
+                            <td
+                                colspan="6"
+                                class="text-center text-muted py-5"
+                            >
+
+                                No aircraft events recorded yet.
+
+                            </td>
+
+                        </tr>
+
+                    {% endif %}
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+    </div>
+
+</div>
+
+{% endblock %}

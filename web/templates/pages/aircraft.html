@@ -1,0 +1,414 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+<div class="container-fluid">
+
+    <!-- ================================================= -->
+    <!-- HEADER -->
+    <!-- ================================================= -->
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+
+        <div>
+
+            <h2 class="mb-1">
+                📡 Live Aircraft & Map
+            </h2>
+
+            <div class="text-muted">
+                Real-time ADS-B telemetry stream
+            </div>
+
+        </div>
+
+
+        <div>
+
+            <span
+                id="aircraft-status"
+                class="badge bg-secondary fs-6"
+            >
+                Connecting...
+            </span>
+
+        </div>
+
+    </div>
+
+
+    <!-- ================================================= -->
+    <!-- SUMMARY CARDS -->
+    <!-- ================================================= -->
+
+    <div class="row g-3 mb-4">
+
+        <div class="col-md-4">
+
+            <div class="card shadow-sm border-0">
+
+                <div class="card-body">
+
+                    <div class="text-muted">
+                        Aircraft Visible
+                    </div>
+
+                    <div
+                        id="aircraft-count"
+                        class="display-6 fw-bold text-info"
+                    >
+                        0
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <div class="col-md-4">
+
+            <div class="card shadow-sm border-0">
+
+                <div class="card-body">
+
+                    <div class="text-muted">
+                        Data Source Stream
+                    </div>
+
+                    <div class="fs-4 fw-bold text-success">
+                        WebSocket / Multi-Adapter
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <div class="col-md-4">
+
+            <div class="card shadow-sm border-0">
+
+                <div class="card-body">
+
+                    <div class="text-muted">
+                        Stream Status
+                    </div>
+
+                    <div id="stream-mode" class="fs-4 fw-bold text-warning">
+                        Initializing...
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    <!-- ================================================= -->
+    <!-- LIVE INTERACTIVE MAP -->
+    <!-- ================================================= -->
+
+    <div class="card shadow-sm border-0 mb-4">
+
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+
+            <h5 class="mb-0">
+                🗺️ Live Airspace Map
+            </h5>
+
+            <small id="last-update" class="text-muted">
+                -
+            </small>
+
+        </div>
+
+        <div class="card-body p-2">
+
+            <div id="map"></div>
+
+        </div>
+
+    </div>
+
+
+    <!-- ================================================= -->
+    <!-- AIRCRAFT TABLE -->
+    <!-- ================================================= -->
+
+    <div class="card shadow-sm border-0">
+
+        <div class="card-header bg-white">
+
+            <h5 class="mb-0">
+                Visible Aircraft Registry
+            </h5>
+
+        </div>
+
+
+        <div class="table-responsive">
+
+            <table class="table table-hover align-middle mb-0">
+
+                <thead>
+
+                    <tr>
+
+                        <th>Flight</th>
+
+                        <th>Registration</th>
+
+                        <th>Aircraft Type</th>
+
+                        <th>Route</th>
+
+                        <th>Altitude</th>
+
+                        <th>Speed</th>
+
+                        <th>ICAO</th>
+
+                    </tr>
+
+                </thead>
+
+
+                <tbody id="aircraft-table">
+
+                    <tr>
+
+                        <td
+                            colspan="7"
+                            class="text-center text-muted py-5"
+                        >
+                            Loading aircraft telemetry...
+                        </td>
+
+                    </tr>
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<script>
+let map = null;
+let markers = {};
+
+function initMap() {
+    map = L.map('map').setView([20.5937, 78.9629], 5); // Default India center, dynamically updates to aircraft
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap &copy; CARTO',
+        maxZoom: 19
+    }).addTo(map);
+}
+
+function updateMapMarkers(aircraftList) {
+    if (!map) return;
+    const currentHexes = new Set();
+    const bounds = [];
+
+    aircraftList.forEach(ac => {
+        if (ac.lat && ac.lon) {
+            const hex = ac.hex;
+            currentHexes.add(hex);
+            const lat = parseFloat(ac.lat);
+            const lon = parseFloat(ac.lon);
+            const track = ac.track || 0;
+            const flight = (ac.flight || hex).trim();
+
+            bounds.push([lat, lon]);
+
+            const iconHtml = `<div class="plane-icon" style="transform: rotate(${track}deg);">✈️</div>`;
+            const customIcon = L.divIcon({
+                html: iconHtml,
+                className: 'leaflet-plane-marker',
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+            });
+
+            let routeText = "Route unavailable";
+            if (ac.route) {
+                if (typeof ac.route === "string") {
+                    routeText = ac.route;
+                } else {
+                    const orig = ac.route.origin_iata || ac.route.origin_icao;
+                    const dest = ac.route.destination_iata || ac.route.destination_icao;
+                    if (orig || dest) {
+                        routeText = `${orig || '???'} → ${dest || '???'}`;
+                    }
+                }
+            }
+
+            const popupText = `
+                <b>${escapeHtml(flight)}</b><br>
+                Route: <b>${escapeHtml(routeText)}</b><br>
+                Registration: ${escapeHtml(ac.registration || ac.r || '-')}<br>
+                Altitude: ${ac.alt_baro ? Number(ac.alt_baro).toLocaleString() + ' ft' : '-'}<br>
+                Speed: ${ac.gs ? Math.round(ac.gs * 1.852) + ' km/h' : '-'}<br>
+                ICAO: <code>${escapeHtml(hex)}</code>
+            `;
+
+            if (markers[hex]) {
+                markers[hex].setLatLng([lat, lon]);
+                markers[hex].setIcon(customIcon);
+                markers[hex].setPopupContent(popupText);
+            } else {
+                const marker = L.marker([lat, lon], { icon: customIcon }).addTo(map);
+                marker.bindPopup(popupText);
+                markers[hex] = marker;
+            }
+        }
+    });
+
+    // Remove markers for gone aircraft
+    Object.keys(markers).forEach(hex => {
+        if (!currentHexes.has(hex)) {
+            map.removeLayer(markers[hex]);
+            delete markers[hex];
+        }
+    });
+
+    // Adjust bounds if new points exist and map hasn't been panned manually
+    if (bounds.length > 0 && !window.mapUserMoved) {
+        map.fitBounds(bounds, { maxZoom: 10, padding: [30, 30] });
+    }
+}
+
+function renderAircraftData(aircraft) {
+    const table = document.getElementById("aircraft-table");
+    const count = document.getElementById("aircraft-count");
+    const status = document.getElementById("aircraft-status");
+    const lastUpdate = document.getElementById("last-update");
+
+    count.textContent = aircraft.length;
+    status.textContent = "● Live Stream";
+    status.className = "badge bg-success fs-6";
+    lastUpdate.textContent = "Updated " + new Date().toLocaleTimeString();
+
+    updateMapMarkers(aircraft);
+
+    if (aircraft.length === 0) {
+        table.innerHTML = `
+            <tr>
+                <td colspan="7" class="text-center text-muted py-5">
+                    No aircraft currently visible.
+                </td>
+            </tr>
+        `;
+        return;
+    }
+
+    table.innerHTML = aircraft.map(function(ac) {
+        const flight = (ac.flight || ac.callsign || "-").trim();
+        const registration = ac.registration || ac.r || "-";
+        const aircraftType = ac.aircraft_type || ac.description || ac.t || "-";
+        const alt = ac.alt_baro ? Number(ac.alt_baro).toLocaleString() + " ft" : "-";
+        const speed = ac.gs ? Math.round(ac.gs * 1.852) + " km/h" : "-";
+        const hex = ac.hex || ac.icao_hex || "-";
+
+        let routeText = "Route unavailable";
+        if (ac.route) {
+            if (typeof ac.route === "string") {
+                routeText = ac.route;
+            } else {
+                const orig = ac.route.origin_iata || ac.route.origin_icao;
+                const dest = ac.route.destination_iata || ac.route.destination_icao;
+                if (orig || dest) {
+                    routeText = `${orig || '???'} → ${dest || '???'}`;
+                }
+            }
+        }
+
+        const elementId = "table-route-" + hex;
+        if (routeText === "Route unavailable" && window.SkyAlertApp && flight !== "-") {
+            window.SkyAlertApp.fetchAdsbdbRoute(flight, hex).then(function(r) {
+                if (r && r.route_short) {
+                    const badgeEl = document.getElementById(elementId);
+                    if (badgeEl) {
+                        badgeEl.textContent = r.route_short;
+                        badgeEl.className = "badge bg-success";
+                    }
+                }
+            });
+        }
+
+        return `
+            <tr style="cursor: pointer;" onclick="if(window.SkyAlertApp) window.SkyAlertApp.openAircraftProfile('${escapeHtml(hex)}')">
+                <td><strong>${escapeHtml(flight)}</strong></td>
+                <td>${escapeHtml(registration)}</td>
+                <td><span class="badge bg-primary">${escapeHtml(aircraftType)}</span></td>
+                <td><span id="${elementId}" class="badge ${routeText !== 'Route unavailable' ? 'bg-success' : 'bg-secondary'}">${escapeHtml(routeText)}</span></td>
+                <td><strong>${escapeHtml(alt)}</strong></td>
+                <td><strong>${escapeHtml(speed)}</strong></td>
+                <td><code>${escapeHtml(hex)}</code></td>
+            </tr>
+        `;
+    }).join("");
+}
+
+function connectWebSocket() {
+    const streamMode = document.getElementById("stream-mode");
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws/live`;
+    const socket = new WebSocket(wsUrl);
+
+    socket.onopen = function() {
+        streamMode.textContent = "WebSocket ⚡";
+        streamMode.className = "fs-4 fw-bold text-success";
+    };
+
+    socket.onmessage = function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            if (Array.isArray(data)) {
+                renderAircraftData(data);
+            }
+        } catch (e) {
+            console.error("WS Parse error", e);
+        }
+    };
+
+    socket.onerror = socket.onclose = function() {
+        streamMode.textContent = "HTTP Polling 🔄";
+        streamMode.className = "fs-4 fw-bold text-warning";
+        fallbackPolling();
+    };
+}
+
+async function fallbackPolling() {
+    try {
+        const response = await fetch("/api/aircraft", { cache: "no-store" });
+        if (response.ok) {
+            const data = await response.json();
+            if (Array.isArray(data)) renderAircraftData(data);
+        }
+    } catch (e) {
+        console.error("HTTP Polling error", e);
+    }
+}
+
+function escapeHtml(value) {
+    const div = document.createElement("div");
+    div.textContent = value ?? "";
+    return div.innerHTML;
+}
+
+initMap();
+connectWebSocket();
+setInterval(fallbackPolling, 5000);
+</script>
+
+{% endblock %}

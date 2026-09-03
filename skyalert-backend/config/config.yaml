@@ -1,0 +1,45 @@
+# SkyAlert Standalone Backend Configuration
+# Point the live data source here. This is the ONLY thing you need to edit
+# for a basic install.
+
+# Live ADS-B data feed (tar1090 / readsb aircraft.json)
+tar1090:
+  url: "http://192.168.0.118/tar1090/data/aircraft.json"
+  poll_interval_seconds: 10
+
+# Station location (used for distance/bearing). Defaults to Kolkata, India.
+station:
+  latitude: 22.5726
+  longitude: 88.3639
+  name: "SkyAlert Station"
+
+# Detection session gap: a new session starts when an aircraft is not seen
+# for longer than this many minutes.
+session_gap_minutes: 10
+
+# Database: SQLite by default (zero-config). To use PostgreSQL, set the
+# DATABASE_URL environment variable instead, e.g.:
+#   export DATABASE_URL="postgresql://skyalert:pass@127.0.0.1:5432/skyalert"
+database:
+  sqlite_path: "data/skyalert_relational.db"
+
+# Enrichment providers
+providers:
+  adsbdb:
+    enabled: true
+    # free, no key required
+    base_url: "https://api.adsbdb.com/v0"
+  skylink:
+    # Optional RapidAPI SkyLink key for real-time tracking enrichment/photos.
+    # Endpoints: /v3/adsb/aircraft, /v3/adsb/aircraft/{icao24}, /v3/adsb/aircraft/statistics
+    enabled: false
+    api_key: ""
+    host: "skylink-api.p.rapidapi.com"
+    base_url: "https://skylink-api.p.rapidapi.com/v3"
+
+enrichment:
+  # Resolve flight route (origin/destination) when a new session starts.
+  resolve_routes: true
+  # Look up aircraft identity (registration, type, operator) for unknown airframes.
+  resolve_identity: true
+  request_timeout_seconds: 3
